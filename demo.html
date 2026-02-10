@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Secure Vault Demo</title>
+
+    <style>
+      body {
+        font-family: system-ui, monospace;
+        background: #020617;
+        color: #e5e7eb;
+        margin: 0;
+      }
+
+      header {
+        padding: 16px;
+        background: #020617;
+        border-bottom: 1px solid #1e293b;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        padding: 16px;
+      }
+
+      section {
+        background: #020617;
+        border: 1px solid #1e293b;
+        border-radius: 8px;
+        padding: 12px;
+      }
+
+      h3 {
+        margin-top: 0;
+        color: #38bdf8;
+      }
+
+      input,
+      button {
+        padding: 6px;
+        margin-top: 6px;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      .vault-item {
+        padding: 6px;
+        border-bottom: 1px solid #1e293b;
+        display: flex;
+        justify-content: space-between;
+      }
+
+      .locked {
+        color: #94a3b8;
+      }
+
+      .unlocked {
+        color: #22c55e;
+      }
+
+      textarea {
+        width: 100%;
+        height: 180px;
+        background: #020617;
+        color: #22c55e;
+        border: 1px solid #1e293b;
+        padding: 6px;
+      }
+
+      footer {
+        padding: 12px;
+        border-top: 1px solid #1e293b;
+        text-align: center;
+        color: #64748b;
+      }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <h2>🔐 Secure Vault (Envelope Encryption Demo)</h2>
+      <p>Password unlocks DEK → DEK unlocks data</p>
+    </header>
+
+    <main>
+      <!-- SETUP -->
+      <section>
+        <h3>1️⃣ Setup Vault (One-time)</h3>
+        <input
+          id="setupPwd"
+          type="password"
+          placeholder="Create master password"
+        />
+        <br />
+        <button onclick="initialize()">Initialize Vault</button>
+        <p class="locked">Creates DEK, encrypts it, stores safely</p>
+      </section>
+
+      <!-- UNLOCK -->
+      <section>
+        <h3>2️⃣ Unlock Vault</h3>
+        <input
+          id="unlockPwd"
+          type="password"
+          placeholder="Enter master password"
+        />
+        <br />
+        <button onclick="unlock()">Unlock</button>
+        <p id="status" class="locked">Vault Locked 🔒</p>
+      </section>
+
+      <!-- VAULT -->
+      <section>
+        <h3>3️⃣ Vault</h3>
+        <input id="secretInput" placeholder="Enter secret text" />
+        <br />
+        <button onclick="encryptSecret()">Add Secret</button>
+
+        <div id="vaultList"></div>
+      </section>
+
+      <!-- SESSION -->
+      <section>
+        <h3>4️⃣ Session Controls</h3>
+        <button onclick="lockSession()">Lock Session</button>
+        <button onclick="wipeAll()">Wipe Vault</button>
+        <p class="locked">Lock = forget DEK, Wipe = delete everything</p>
+      </section>
+
+      <!-- LOG -->
+      <section style="grid-column: span 2">
+        <h3>🧾 System Log</h3>
+        <textarea id="log" readonly></textarea>
+      </section>
+    </main>
+
+    <footer>🔁 Refresh page → vault locks automatically</footer>
+
+    <script>
+      /* ---------------- STATE ---------------- */
+
+      const IV_LENGTH = 12;
+      let dekKey = null;
+
+      /* ---------------- LOG ---------------- */
+
+      const logBox = document.getElementById("log");
+      function log(msg) {
+        logBox.value += msg + "\n";
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+
+      /* ---------------- BASE64 ---------------- */
+
+      function toBase64(bytes) {
+        log(`📊 toBase64: Converting ${bytes.length} bytes to base64`);
+        let s = "";
+        bytes.forEach((b) => (s += String.fromCharCode(b)));
+        const result = btoa(s);
+        log(`📊 toBase64: Result length = ${result.length} chars`);
+        return result;
+      }
+
+      function fromBase64(str) {
+        log(
+          `📊 fromBase64: Converting base64 string (${str.length} chars) to bytes`,
+        );
+        const result = Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
+        log(`📊 fromBase64: Result = ${result.length} bytes`);
+        return result;
+      }
+
+      /* ---------------- PACK ---------------- */
+
+      function pack(iv, ct) {
+        log(
+          `📦 pack: Packing IV (${iv.length} bytes) + ciphertext (${ct.byteLength} bytes)`,
+        );
+        const out = new Uint8Array(iv.length + ct.byteLength);
+        out.set(iv);
+        out.set(new Uint8Array(ct), iv.length);
+        log(`📦 pack: Total packed size = ${out.length} bytes`);
+        return out;
+      }
+
+      function unpack(buf) {
+        log(
+          `📦 unpack: Unpacking ${buf.length} bytes (IV_LENGTH=${IV_LENGTH})`,
+        );
+        const result = {
+          iv: buf.slice(0, IV_LENGTH),
+          ciphertext: buf.slice(IV_LENGTH),
+        };
+        log(
+          `📦 unpack: IV = ${result.iv.length} bytes, ciphertext = ${result.ciphertext.length} bytes`,
+        );
+        return result;
+      }
+
+      /* ---------------- KEK ---------------- */
+
+      async function deriveKEK(pwd, salt) {
+        log("🔑 Deriving KEK from password");
+        log(`🔑 deriveKEK: Password length = ${pwd.length} chars`);
+        log(`🔑 deriveKEK: Salt length = ${salt.length} bytes`);
+
+        const encodedPwd = new TextEncoder().encode(pwd);
+        log(`🔑 deriveKEK: Encoded password = ${encodedPwd.length} bytes`);
+
+        const km = await crypto.subtle.importKey(
+          "raw",
+          encodedPwd,
+          "PBKDF2",
+          false,
+          ["deriveKey"],
+        );
+        log(`🔑 deriveKEK: Key material imported successfully`);
+
+        const kek = await crypto.subtle.deriveKey(
+          { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+          km,
+          { name: "AES-GCM", length: 256 },
+          false,
+          ["encrypt", "decrypt"],
+        );
+        log(
+          `🔑 deriveKEK: KEK derived successfully (256-bit AES-GCM, 100000 iterations)`,
+        );
+        return kek;
+      }
+
+      /* ---------------- INIT ---------------- */
+
+      async function initialize() {
+        log("\n========== INITIALIZE VAULT ==========\n");
+        const pwd = setupPwd.value;
+        log(
+          `🚀 initialize: Password field value length = ${pwd ? pwd.length : 0}`,
+        );
+
+        if (!pwd) {
+          log("❌ initialize: No password provided");
+          return alert("Password required");
+        }
+
+        log("🚀 initialize: Starting vault initialization");
+
+        const salt = crypto.getRandomValues(new Uint8Array(16));
+        log(`🚀 initialize: Generated salt = ${salt.length} bytes`);
+
+        const dek = crypto.getRandomValues(new Uint8Array(32));
+        log(`🚀 initialize: Generated DEK = ${dek.length} bytes`);
+
+        const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+        log(`🚀 initialize: Generated IV = ${iv.length} bytes`);
+
+        const kek = await deriveKEK(pwd, salt);
+        log(`🚀 initialize: KEK derived successfully`);
+
+        const encDek = await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv },
+          kek,
+          dek,
+        );
+        log(
+          `🚀 initialize: DEK encrypted with KEK, encrypted DEK size = ${encDek.byteLength} bytes`,
+        );
+
+        const packedEncDek = pack(iv, encDek);
+        const keyStore = {
+          salt: toBase64(salt),
+          encryptedDEK: toBase64(packedEncDek),
+        };
+
+        localStorage.setItem("key_store", JSON.stringify(keyStore));
+        log(`🚀 initialize: Key store saved to localStorage`);
+        log(
+          `🚀 initialize: Key store structure = {salt: ${keyStore.salt.length} chars, encryptedDEK: ${keyStore.encryptedDEK.length} chars}`,
+        );
+
+        localStorage.setItem("vault", "[]");
+        log(`🚀 initialize: Empty vault array created in localStorage`);
+
+        log("💾 Vault initialized successfully");
+        log("\n======================================\n");
+      }
+
+      /* ---------------- UNLOCK ---------------- */
+
+      async function unlock() {
+        log("\n========== UNLOCK VAULT ==========\n");
+        const pwd = unlockPwd.value;
+        log(`🔓 unlock: Password field value length = ${pwd ? pwd.length : 0}`);
+
+        const keyStoreStr = localStorage.getItem("key_store");
+        log(
+          `🔓 unlock: Key store from localStorage = ${keyStoreStr ? "Found" : "Not found"}`,
+        );
+
+        if (!keyStoreStr) {
+          log("❌ unlock: Vault not initialized");
+          return alert("Not initialized");
+        }
+
+        const ks = JSON.parse(keyStoreStr);
+        log(`🔓 unlock: Key store parsed successfully`);
+
+        try {
+          log(`🔓 unlock: Starting decryption process`);
+
+          const salt = fromBase64(ks.salt);
+          log(`🔓 unlock: Salt extracted`);
+
+          const packed = fromBase64(ks.encryptedDEK);
+          log(`🔓 unlock: Encrypted DEK extracted`);
+
+          const { iv, ciphertext } = unpack(packed);
+          log(`🔓 unlock: IV and ciphertext unpacked`);
+
+          const kek = await deriveKEK(pwd, salt);
+          log(`🔓 unlock: KEK derived from password`);
+
+          const raw = await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv },
+            kek,
+            ciphertext,
+          );
+          log(
+            `🔓 unlock: DEK decrypted successfully, raw DEK size = ${raw.byteLength} bytes`,
+          );
+
+          dekKey = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, [
+            "encrypt",
+            "decrypt",
+          ]);
+          log(`🔓 unlock: DEK imported as AES-GCM key`);
+          log(`🔓 unlock: dekKey variable set (in-memory DEK active)`);
+
+          status.textContent = "Vault Unlocked 🔓";
+          status.className = "unlocked";
+          log("✅ DEK unlocked successfully - Vault is now accessible");
+          log("\n======================================\n");
+          renderVault();
+        } catch (error) {
+          log(`❌ unlock: Decryption failed - ${error.message}`);
+          log("❌ Wrong password or corrupted data");
+          log("\n======================================\n");
+        }
+      }
+
+      /* ---------------- ENCRYPT ---------------- */
+
+      async function encryptSecret() {
+        log("\n========== ENCRYPT SECRET ==========\n");
+        log(
+          `🔐 encryptSecret: Checking dekKey status = ${dekKey ? "Active" : "Null"}`,
+        );
+
+        if (!dekKey) {
+          log("❌ encryptSecret: No active DEK - vault is locked");
+          return alert("Unlock vault first");
+        }
+
+        const text = secretInput.value;
+        log(`🔐 encryptSecret: Input text length = ${text.length} chars`);
+
+        if (!text) {
+          log("⚠️ encryptSecret: No text provided, aborting");
+          return;
+        }
+
+        const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+        log(`🔐 encryptSecret: Generated IV = ${iv.length} bytes`);
+
+        const encodedText = new TextEncoder().encode(text);
+        log(`🔐 encryptSecret: Encoded text = ${encodedText.length} bytes`);
+
+        const ct = await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv },
+          dekKey,
+          encodedText,
+        );
+        log(
+          `🔐 encryptSecret: Text encrypted, ciphertext size = ${ct.byteLength} bytes`,
+        );
+
+        const vaultStr = localStorage.getItem("vault");
+        const vault = JSON.parse(vaultStr);
+        log(`🔐 encryptSecret: Current vault has ${vault.length} secrets`);
+
+        const packedData = pack(iv, ct);
+        const base64Data = toBase64(packedData);
+        vault.push(base64Data);
+        log(`🔐 encryptSecret: Adding secret #${vault.length} to vault`);
+
+        localStorage.setItem("vault", JSON.stringify(vault));
+        log(
+          `🔐 encryptSecret: Vault updated in localStorage, total secrets = ${vault.length}`,
+        );
+
+        log("🔐 Secret encrypted & stored successfully");
+        log("\n======================================\n");
+
+        secretInput.value = "";
+        renderVault();
+      }
+
+      /* ---------------- RENDER ---------------- */
+
+      async function renderVault() {
+        log("\n========== RENDER VAULT ==========\n");
+        log(`🎨 renderVault: Starting vault rendering`);
+        log(
+          `🎨 renderVault: dekKey status = ${dekKey ? "Active (can decrypt)" : "Null (locked)"}`,
+        );
+
+        const list = document.getElementById("vaultList");
+        list.innerHTML = "";
+        log(`🎨 renderVault: Cleared vault list UI`);
+
+        const vaultStr = localStorage.getItem("vault") || "[]";
+        const vault = JSON.parse(vaultStr);
+        log(
+          `🎨 renderVault: Loaded vault from localStorage, total secrets = ${vault.length}`,
+        );
+
+        for (let i = 0; i < vault.length; i++) {
+          log(`🎨 renderVault: Processing secret #${i + 1}`);
+          const div = document.createElement("div");
+          div.className = "vault-item";
+
+          if (!dekKey) {
+            log(
+              `🎨 renderVault: Secret #${i + 1} - showing as locked (no DEK)`,
+            );
+            div.innerHTML = `🔒 Secret ${i + 1} <span class="locked">(locked)</span>`;
+          } else {
+            log(`🎨 renderVault: Secret #${i + 1} - decrypting...`);
+            const packed = fromBase64(vault[i]);
+            const { iv, ciphertext } = unpack(packed);
+
+            const pt = await crypto.subtle.decrypt(
+              { name: "AES-GCM", iv },
+              dekKey,
+              ciphertext,
+            );
+            log(
+              `🎨 renderVault: Secret #${i + 1} - decrypted, plaintext size = ${pt.byteLength} bytes`,
+            );
+
+            const decodedText = new TextDecoder().decode(pt);
+            log(
+              `🎨 renderVault: Secret #${i + 1} - decoded to ${decodedText.length} chars`,
+            );
+            div.innerHTML = `🔓 ${decodedText}`;
+          }
+
+          list.appendChild(div);
+        }
+
+        log(
+          `🎨 renderVault: Vault rendering complete, displayed ${vault.length} secrets`,
+        );
+        log("\n======================================\n");
+      }
+
+      /* ---------------- SESSION ---------------- */
+
+      function lockSession() {
+        log("\n========== LOCK SESSION ==========\n");
+        log(
+          `🔒 lockSession: Current dekKey status = ${dekKey ? "Active" : "Null"}`,
+        );
+
+        dekKey = null;
+        log(`🔒 lockSession: dekKey set to null (DEK cleared from memory)`);
+
+        status.textContent = "Vault Locked 🔒";
+        status.className = "locked";
+        log(`🔒 lockSession: UI status updated to locked`);
+
+        log("🔒 Session locked successfully - DEK cleared from memory");
+        log("🔒 All secrets remain encrypted in localStorage");
+        log("\n======================================\n");
+        renderVault();
+      }
+
+      function wipeAll() {
+        log("\n========== WIPE VAULT ==========\n");
+        log(`💥 wipeAll: User requested to wipe vault`);
+        log(`💥 wipeAll: Current localStorage items = ${localStorage.length}`);
+
+        if (!confirm("Delete everything?")) {
+          log(`💥 wipeAll: User cancelled wipe operation`);
+          log("\n======================================\n");
+          return;
+        }
+
+        log(`💥 wipeAll: User confirmed wipe operation`);
+        log(`💥 wipeAll: Clearing all localStorage data...`);
+
+        localStorage.clear();
+        log(
+          `💥 wipeAll: localStorage cleared, items remaining = ${localStorage.length}`,
+        );
+
+        log(
+          `💥 wipeAll: Current dekKey status = ${dekKey ? "Active" : "Null"}`,
+        );
+        dekKey = null;
+        log(`💥 wipeAll: dekKey set to null`);
+
+        log("💥 Vault wiped completely - all data deleted");
+        log("💥 Key store, DEK, and all secrets have been permanently removed");
+        log("\n======================================\n");
+        renderVault();
+      }
+    </script>
+  </body>
+</html>

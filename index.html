@@ -1,0 +1,193 @@
+<script>
+  //   iv packed
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  const IV_LENGTH = 12; // AES-GCM standard
+
+  function pack(iv, ciphertext) {
+    const packed = new Uint8Array(iv.length + ciphertext.byteLength);
+    packed.set(iv, 0);
+    packed.set(new Uint8Array(ciphertext), iv.length);
+    return packed;
+  }
+
+  function unpack(packed) {
+    return {
+      iv: packed.slice(0, IV_LENGTH),
+      ciphertext: packed.slice(IV_LENGTH),
+    };
+  }
+
+  function toBase64(bytes) {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
+  function fromBase64(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  async function deriveKEK(password, salt) {
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(password),
+      "PBKDF2",
+      false,
+      ["deriveKey"],
+    );
+
+    return crypto.subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        salt,
+        iterations: 600_000,
+        hash: "SHA-256",
+      },
+      keyMaterial,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"],
+    );
+  }
+
+  async function setupKeyStore(password) {
+    console.log("generating random salt, dek, and iv...");
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const dekRaw = crypto.getRandomValues(new Uint8Array(32)); // AES-256
+    const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+    console.log("deriving KEK from password and salt...");
+    const kek = await deriveKEK(password, salt);
+    console.log("derived KEK.", kek);
+    console.log("encrypting DEK with KEK and iv...");
+    const encryptedDEK = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      kek,
+      dekRaw,
+    );
+    console.log("encrypted DEK.", encryptedDEK);
+    const packedEncryptedDEK = pack(iv, encryptedDEK);
+    console.log("packed encrypted DEK.", packedEncryptedDEK);
+    console.log("storing salt in db and encrypted DEK in Secure storage...");
+    return {
+      salt: toBase64(salt),
+      encryptedDEK: toBase64(packedEncryptedDEK),
+    };
+  }
+
+  async function recoverDEK(password, saltB64, encryptedDEKB64) {
+    const salt = fromBase64(saltB64);
+    const packed = fromBase64(encryptedDEKB64);
+
+    const { iv, ciphertext } = unpack(packed);
+    console.log("deriving KEK from password and salt...");
+    const kek = await deriveKEK(password, salt);
+    console.log("derived KEK.", kek);
+    console.log("decrypting DEK with KEK and iv...");
+    const dekRaw = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      kek,
+      ciphertext,
+    );
+    console.log("decrypted DEK.", dekRaw);
+
+    return crypto.subtle.importKey("raw", dekRaw, { name: "AES-GCM" }, false, [
+      "encrypt",
+      "decrypt",
+    ]);
+  }
+
+  async function recoverDEK(password, saltB64, encryptedDEKB64) {
+    const salt = fromBase64(saltB64);
+    const packed = fromBase64(encryptedDEKB64);
+    console.log("get salt and packed encrypted DEK from storage...");
+
+    const { iv, ciphertext } = unpack(packed);
+    console.log("deriving KEK from password and salt...");
+    const kek = await deriveKEK(password, salt);
+    console.log("decrypting DEK with KEK and iv...");
+    const dekRaw = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      kek,
+      ciphertext,
+    );
+    console.log("decrypted DEK.", dekRaw);
+    return crypto.subtle.importKey("raw", dekRaw, { name: "AES-GCM" }, false, [
+      "encrypt",
+      "decrypt",
+    ]);
+  }
+
+  async function encryptData(dekKey, plaintext) {
+    console.log("generating iv for data encryption...");
+    const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+    console.log("generated iv for data encryption:", iv);
+    console.log("encrypting plaintext:", plaintext);
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      dekKey,
+      encoder.encode(plaintext),
+    );
+    console.log("encrypted ciphertext:", ciphertext);
+    return toBase64(pack(iv, ciphertext));
+  }
+
+  async function decryptData(dekKey, packedB64) {
+    const packed = fromBase64(packedB64);
+    const { iv, ciphertext } = unpack(packed);
+    console.log("decrypting data with DEK...");
+    console.log("using iv:", iv);
+    console.log("using ciphertext:", ciphertext);
+    const plaintextBuffer = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      dekKey,
+      ciphertext,
+    );
+    console.log("decrypted plaintext buffer:", plaintextBuffer);
+    console.log("decoding plaintext buffer to string...");
+    return decoder.decode(plaintextBuffer);
+  }
+
+  (async () => {
+    const password = "correct horse battery staple";
+
+    // Initial setup
+    console.log("Setting up keystore...");
+    const keyStore = await setupKeyStore(password);
+    console.log("KeyStore:", keyStore);
+    console.log("----------------------------------------------");
+
+    // Later...
+    console.log("Recovering DEK from keystore...");
+    const dek = await recoverDEK(
+      password,
+      keyStore.salt,
+      keyStore.encryptedDEK,
+    );
+    console.log("Recovered DEK:", dek);
+    console.log("----------------------------------------------");
+
+    // Encrypt data
+    console.log("Encrypting data with DEK...");
+    const storedEncryptedData = await encryptData(
+      dek,
+      `{name: "Alice", age: 30}`,
+    );
+    console.log("Stored Encrypted Data:", storedEncryptedData);
+    console.log("----------------------------------------------");
+
+    // Decrypt data
+    console.log("Decrypting data with DEK...");
+    const result = await decryptData(dek, storedEncryptedData);
+    console.log("Decrypted Result:", result);
+
+    console.log(result); // Encrypt everything!
+  })();
