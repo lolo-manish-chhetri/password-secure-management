@@ -1,4 +1,4 @@
-<script>
+<!-- <script>
   //   iv packed
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -190,4 +190,643 @@
     console.log("Decrypted Result:", result);
 
     console.log(result); // Encrypt everything!
-  })();
+  })(); -->
+
+
+  <!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Zero-Knowledge Vault Demo</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        background: #0b1020;
+        color: #f5f7ff;
+        margin: 0;
+        padding: 24px;
+      }
+      h1,
+      h2 {
+        margin-top: 0;
+      }
+      .app {
+        max-width: 1100px;
+        margin: 0 auto;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 24px;
+      }
+      .card {
+        background: #171d33;
+        border-radius: 12px;
+        padding: 16px 18px 18px;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+        border: 1px solid #262f4d;
+      }
+      label {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        color: #9aa3d9;
+        display: block;
+        margin-bottom: 4px;
+      }
+      input,
+      textarea {
+        width: 100%;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid #303a5e;
+        background: #0f1425;
+        color: #f5f7ff;
+        font-family: inherit;
+        font-size: 14px;
+        box-sizing: border-box;
+      }
+      textarea {
+        resize: vertical;
+        min-height: 72px;
+      }
+      input:focus,
+      textarea:focus {
+        outline: none;
+        border-color: #4f7dff;
+        box-shadow: 0 0 0 1px rgba(79, 125, 255, 0.4);
+      }
+      button {
+        border: none;
+        border-radius: 999px;
+        padding: 6px 14px;
+        background: linear-gradient(135deg, #4f7dff, #8f67ff);
+        color: white;
+        font-weight: 600;
+        font-size: 13px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        box-shadow: 0 10px 24px rgba(79, 125, 255, 0.5);
+      }
+      button.secondary {
+        background: transparent;
+        box-shadow: none;
+        border-radius: 999px;
+        border: 1px solid #3a456d;
+        color: #d3d9ff;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        box-shadow: none;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+      }
+      .row > * {
+        flex: 1;
+      }
+      .section-title {
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #a1acff;
+        margin-bottom: 8px;
+      }
+      .muted {
+        color: #7e88b8;
+        font-size: 12px;
+      }
+      .log {
+        font-family: "JetBrains Mono", SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        font-size: 11px;
+        background: #050813;
+        border-radius: 8px;
+        padding: 8px;
+        max-height: 260px;
+        overflow: auto;
+        border: 1px solid #222a46;
+        white-space: pre-wrap;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: rgba(79, 125, 255, 0.16);
+        color: #d7e0ff;
+        font-size: 11px;
+        gap: 4px;
+      }
+      .pill span.dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: #4f7dff;
+      }
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .stack-md {
+        gap: 10px;
+      }
+      .divider {
+        height: 1px;
+        background: linear-gradient(
+          to right,
+          transparent,
+          #262f4d,
+          transparent
+        );
+        margin: 10px 0 8px;
+      }
+      .badge {
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid #35406a;
+        font-size: 11px;
+        color: #97a2e8;
+      }
+      .grid-two {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .code {
+        font-family: "JetBrains Mono", SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        font-size: 11px;
+        color: #cfd6ff;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Zero-Knowledge Vault with Sharing</h1>
+    <p class="muted">
+      Household vault items are encrypted with a DEK. Each user derives a KEK
+      from their master password and gets a wrapped copy of the DEK. Sharing =
+      wrapping the same DEK for another user — the backend never sees the
+      plaintext DEK or vault data.
+    </p>
+
+    <div class="app">
+      <div class="card">
+        <div class="section-title">1 · Users &amp; Keys</div>
+        <div class="muted" style="margin-bottom: 10px">
+          Register two demo users and derive their KEKs locally from passwords.
+        </div>
+        <div class="stack-md">
+          <div class="grid-two">
+            <div>
+              <label>User 1 Username</label>
+              <input id="u1-username" value="alice" />
+            </div>
+            <div>
+              <label>User 1 Master Password</label>
+              <input id="u1-password" type="password" value="password1" />
+            </div>
+          </div>
+          <div class="grid-two">
+            <div>
+              <label>User 2 Username</label>
+              <input id="u2-username" value="bob" />
+            </div>
+            <div>
+              <label>User 2 Master Password</label>
+              <input id="u2-password" type="password" value="password2" />
+            </div>
+          </div>
+          <div class="row" style="margin-top: 4px">
+            <button id="btn-register">Register &amp; Derive KEKs</button>
+            <button id="btn-show-state" class="secondary">
+              View In-Memory Server State
+            </button>
+          </div>
+          <div class="stack">
+            <div class="muted">
+              <span class="badge">User IDs (from backend)</span>
+            </div>
+            <div class="code">
+              U1 ID: <span id="u1-id">–</span><br />
+              U2 ID: <span id="u2-id">–</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="section-title">2 · Create Vault Item (User 1)</div>
+        <div class="muted" style="margin-bottom: 8px">
+          We generate a household DEK, encrypt the item with it, then wrap the
+          DEK with User 1's KEK and send the ciphertexts to the backend.
+        </div>
+        <div class="stack-md">
+          <div>
+            <label>Household ID</label>
+            <input id="household-id" value="H1" />
+          </div>
+          <div>
+            <label>Vault Item (plaintext JSON or text)</label>
+            <textarea id="vault-plaintext">
+{"account":"Bank","number":"****4221","note":"Primary checking"}</textarea>
+          </div>
+          <button id="btn-create-item">Create Vault Item as User 1</button>
+          <div class="stack">
+            <span class="badge">Created Item ID</span>
+            <div class="code">Item ID: <span id="item-id">–</span></div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="section-title">3 · Share with User 2</div>
+        <div class="muted" style="margin-bottom: 8px">
+          User 1 locally unwraps the DEK with their KEK, then re-wraps it with
+          User 2's KEK and sends only the wrapped DEK to the backend.
+        </div>
+        <button id="btn-share">Share Item with User 2</button>
+        <p class="muted" style="margin-top: 6px">
+          Backend ends up with two wrapped DEKs for the same vault item: one for
+          User 1 and one for User 2.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="section-title">
+          4 · User 2 Accesses Shared Vault Item
+        </div>
+        <p class="muted">
+          User 2 fetches <strong>only</strong> ciphertexts from the backend:
+          <code>encryptedData</code> and their <code>wrappedDEK</code>. They
+          derive KEK2 from their password, unwrap the DEK, then decrypt the
+          vault item.
+        </p>
+        <div class="stack-md" style="margin-top: 8px">
+          <button id="btn-access">Access Item as User 2</button>
+          <div class="stack">
+            <span class="badge">Decrypted Vault Item (User 2)</span>
+            <pre id="u2-decrypted" class="log"></pre>
+          </div>
+          <div class="divider"></div>
+          <div class="stack">
+            <div class="row" style="align-items: center">
+              <div class="pill">
+                <span class="dot"></span>
+                <span>Client-Side Crypto Trace</span>
+              </div>
+              <span class="muted" style="text-align: right; flex: 1">
+                DEK is <strong>never</strong> sent to the backend.
+              </span>
+            </div>
+            <pre id="log" class="log"></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      const IV_LENGTH = 12; // AES-GCM standard
+
+      const logEl = document.getElementById("log");
+      function log(message) {
+        const ts = new Date().toISOString().split("T")[1].replace("Z", "");
+        logEl.textContent += `[${ts}] ${message}\n`;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function pack(iv, ciphertext) {
+        const packed = new Uint8Array(iv.length + ciphertext.byteLength);
+        packed.set(iv, 0);
+        packed.set(new Uint8Array(ciphertext), iv.length);
+        return packed;
+      }
+
+      function unpack(packed) {
+        return {
+          iv: packed.slice(0, IV_LENGTH),
+          ciphertext: packed.slice(IV_LENGTH),
+        };
+      }
+
+      function toBase64(bytes) {
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+      }
+
+      function fromBase64(base64) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes;
+      }
+
+      async function deriveKEK(password, saltBytes) {
+        const keyMaterial = await crypto.subtle.importKey(
+          "raw",
+          encoder.encode(password),
+          "PBKDF2",
+          false,
+          ["deriveKey"],
+        );
+        return crypto.subtle.deriveKey(
+          {
+            name: "PBKDF2",
+            salt: saltBytes,
+            iterations: 250000,
+            hash: "SHA-256",
+          },
+          keyMaterial,
+          { name: "AES-GCM", length: 256 },
+          false,
+          ["encrypt", "decrypt"],
+        );
+      }
+
+      async function generateHouseholdDEK() {
+        const dekRaw = crypto.getRandomValues(new Uint8Array(32));
+        return dekRaw;
+      }
+
+      async function wrapDEKWithKEK(dekRawBytes, kek) {
+        const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+        const ciphertext = await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv },
+          kek,
+          dekRawBytes,
+        );
+        return toBase64(pack(iv, ciphertext));
+      }
+
+      async function unwrapDEKWithKEK(wrappedDEKB64, kek) {
+        const packed = fromBase64(wrappedDEKB64);
+        const { iv, ciphertext } = unpack(packed);
+        const dekRaw = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv },
+          kek,
+          ciphertext,
+        );
+        return new Uint8Array(dekRaw);
+      }
+
+      async function importDEKForData(dekRawBytes) {
+        return crypto.subtle.importKey(
+          "raw",
+          dekRawBytes,
+          { name: "AES-GCM" },
+          false,
+          ["encrypt", "decrypt"],
+        );
+      }
+
+      async function encryptWithDEK(dekKey, plaintext) {
+        const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+        const ct = await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv },
+          dekKey,
+          encoder.encode(plaintext),
+        );
+        return toBase64(pack(iv, ct));
+      }
+
+      async function decryptWithDEK(dekKey, packedB64) {
+        const packed = fromBase64(packedB64);
+        const { iv, ciphertext } = unpack(packed);
+        const ptBuf = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv },
+          dekKey,
+          ciphertext,
+        );
+        return decoder.decode(ptBuf);
+      }
+
+      // Demo state (kept only in the browser)
+      const state = {
+        user1: {
+          id: null,
+          salt: null,
+          kek: null,
+        },
+        user2: {
+          id: null,
+          salt: null,
+          kek: null,
+        },
+        householdDEKRaw: null, // Uint8Array
+        itemId: null,
+        wrappedDEKForUser1: null,
+      };
+
+      // --- Wire up UI ---
+      const u1UsernameInput = document.getElementById("u1-username");
+      const u1PasswordInput = document.getElementById("u1-password");
+      const u2UsernameInput = document.getElementById("u2-username");
+      const u2PasswordInput = document.getElementById("u2-password");
+      const u1IdSpan = document.getElementById("u1-id");
+      const u2IdSpan = document.getElementById("u2-id");
+      const btnRegister = document.getElementById("btn-register");
+      const btnShowState = document.getElementById("btn-show-state");
+      const householdInput = document.getElementById("household-id");
+      const vaultPlaintextInput = document.getElementById("vault-plaintext");
+      const btnCreateItem = document.getElementById("btn-create-item");
+      const itemIdSpan = document.getElementById("item-id");
+      const btnShare = document.getElementById("btn-share");
+      const btnAccess = document.getElementById("btn-access");
+      const u2DecryptedOutput = document.getElementById("u2-decrypted");
+
+      async function postJSON(url, body) {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`${res.status} ${res.statusText}: ${text}`);
+        }
+        return res.json();
+      }
+
+      btnRegister.addEventListener("click", async () => {
+        logEl.textContent = "";
+        u2DecryptedOutput.textContent = "";
+        try {
+          // User 1
+          const u1Salt = crypto.getRandomValues(new Uint8Array(16));
+          log("User1: deriving KEK1 from master password with PBKDF2...");
+          const kek1 = await deriveKEK(u1PasswordInput.value, u1Salt);
+          log("User1: KEK1 derived.");
+          const reg1 = await postJSON("/register", {
+            username: u1UsernameInput.value,
+            salt: toBase64(u1Salt),
+          });
+
+          state.user1.id = reg1.userId;
+          state.user1.salt = u1Salt;
+          state.user1.kek = kek1;
+          u1IdSpan.textContent = reg1.userId;
+
+          // User 2
+          const u2Salt = crypto.getRandomValues(new Uint8Array(16));
+          log("User2: deriving KEK2 from master password with PBKDF2...");
+          const kek2 = await deriveKEK(u2PasswordInput.value, u2Salt);
+          log("User2: KEK2 derived.");
+          const reg2 = await postJSON("/register", {
+            username: u2UsernameInput.value,
+            salt: toBase64(u2Salt),
+          });
+
+          state.user2.id = reg2.userId;
+          state.user2.salt = u2Salt;
+          state.user2.kek = kek2;
+          u2IdSpan.textContent = reg2.userId;
+
+          log(
+            `Registered users with backend: U1=${reg1.userId}, U2=${reg2.userId}`,
+          );
+          log("Salts are stored at backend; KEKs stay only in this browser.");
+        } catch (err) {
+          console.error(err);
+          log("Error during registration / KEK derivation: " + err.message);
+        }
+      });
+
+      btnCreateItem.addEventListener("click", async () => {
+        try {
+          if (!state.user1.id || !state.user1.kek) {
+            alert("Register users first.");
+            return;
+          }
+          const householdId = householdInput.value || "H1";
+          log("Generating random DEK_H1 for household vault...");
+          const dekRaw = await generateHouseholdDEK();
+          state.householdDEKRaw = dekRaw;
+
+          const dekKey = await importDEKForData(dekRaw);
+          log("Encrypting vault item with DEK_H1 (AES-256-GCM)...");
+          const encryptedData = await encryptWithDEK(
+            dekKey,
+            vaultPlaintextInput.value,
+          );
+
+          log("Wrapping DEK_H1 with KEK1 for User 1...");
+          const wrappedDEKUser1 = await wrapDEKWithKEK(
+            dekRaw,
+            state.user1.kek,
+          );
+          state.wrappedDEKForUser1 = wrappedDEKUser1;
+
+          const res = await postJSON("/vault/create", {
+            householdId,
+            ownerId: state.user1.id,
+            encryptedData,
+            wrappedDEK: wrappedDEKUser1,
+          });
+
+          state.itemId = res.itemId;
+          itemIdSpan.textContent = res.itemId;
+          log(
+            `Created vault item ${res.itemId} on backend with encryptedData + wrapped DEK for User1.`,
+          );
+        } catch (err) {
+          console.error(err);
+          log("Error creating vault item: " + err.message);
+        }
+      });
+
+      btnShare.addEventListener("click", async () => {
+        try {
+          if (!state.itemId) {
+            alert("Create a vault item first.");
+            return;
+          }
+          if (!state.user2.id || !state.user2.kek) {
+            alert("Register users first.");
+            return;
+          }
+          log(
+            "User1: locally unwrapping DEK_H1 with KEK1 (owner's master password)...",
+          );
+          const dekRaw = await unwrapDEKWithKEK(
+            state.wrappedDEKForUser1,
+            state.user1.kek,
+          );
+
+          log("User1: re-wrapping DEK_H1 with KEK2 for User2...");
+          const wrappedForUser2 = await wrapDEKWithKEK(
+            dekRaw,
+            state.user2.kek,
+          );
+
+          await postJSON("/vault/share", {
+            itemId: state.itemId,
+            recipientId: state.user2.id,
+            wrappedDEKForRecipient: wrappedForUser2,
+          });
+
+          log(
+            `Shared item ${state.itemId} with User2. Backend now stores an additional wrapped DEK for U2.`,
+          );
+        } catch (err) {
+          console.error(err);
+          log("Error sharing item: " + err.message);
+        }
+      });
+
+      btnAccess.addEventListener("click", async () => {
+        try {
+          if (!state.itemId) {
+            alert("Create and share a vault item first.");
+            return;
+          }
+          if (!state.user2.id || !state.user2.kek) {
+            alert("Register users first.");
+            return;
+          }
+          log("User2: requesting /vault/access for shared item...");
+          const res = await postJSON("/vault/access", {
+            itemId: state.itemId,
+            userId: state.user2.id,
+          });
+
+          const { encryptedData, wrappedDEK } = res;
+          log("User2: received encryptedData + wrappedDEK from backend.");
+          log("User2: unwrapping DEK_H1 with KEK2 (derived from password)...");
+          const dekRaw = await unwrapDEKWithKEK(wrappedDEK, state.user2.kek);
+          const dekKey = await importDEKForData(dekRaw);
+
+          log("User2: decrypting vaultDataEncrypted with DEK_H1...");
+          const plaintext = await decryptWithDEK(dekKey, encryptedData);
+          u2DecryptedOutput.textContent = plaintext;
+          log("User2: successfully recovered plaintext vault item.");
+        } catch (err) {
+          console.error(err);
+          log("Error accessing item as User2: " + err.message);
+        }
+      });
+
+      btnShowState.addEventListener("click", async () => {
+        try {
+          const res = await fetch("/debug/state");
+          const json = await res.json();
+          log("Server in-memory state:\n" + JSON.stringify(json, null, 2));
+        } catch (err) {
+          console.error(err);
+          log("Error fetching debug state: " + err.message);
+        }
+      });
+    </script>
+  </body>
+</html>
