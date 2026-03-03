@@ -120,7 +120,7 @@
         padding: 12px;
         font-family: 'Monaco', 'Courier New', monospace;
         font-size: 12px;
-        max-height: 300px;
+        max-height: 600px;
         overflow-y: auto;
         color: #a8d5ff;
         white-space: pre-wrap;
@@ -191,12 +191,23 @@
         <div class="card">
           <h2>Step 1: Register</h2>
           <div class="stack">
-            <div><label>User 1</label><input id="u1-username" value="alice" /><label>Password</label><input id="u1-password" type="password" value="password1" /></div>
-            <div><label>User 2</label><input id="u2-username" value="bob" /><label>Password</label><input id="u2-password" type="password" value="password2" /></div>
+            <div><label>User 1</label><input id="u1-username" value="manish" /><label>Password</label><input id="u1-password" type="password" value="manish1" /></div>
+            <div><label>User 2</label><input id="u2-username" value="jason" /><label>Password</label><input id="u2-password" type="password" value="jason1" /></div>
             <button id="btn-register">Register Users</button>
           </div>
           <div style="margin-top: 12px"><span class="badge">U1: <span id="u1-id">-</span></span></div>
           <div style="margin-top: 8px"><span class="badge">U2: <span id="u2-id">-</span></span></div>
+        </div>
+
+        <div class="card">
+          <h2>👤 Switch User</h2>
+          <div class="stack">
+            <div><label>Current User</label><select id="current-user-select" style="margin-bottom: 10px;"><option value="">-- No user selected --</option></select></div>
+            <div id="current-user-info" style="padding: 10px; background: #0f1425; border-radius: 4px; border: 1px solid #303a5e; font-size: 13px; color: #a8d5ff; display: none;">
+              <div>User ID: <strong id="current-user-id">-</strong></div>
+              <div style="margin-top: 5px;">Username: <strong id="current-user-name">-</strong></div>
+            </div>
+          </div>
         </div>
 
         <div class="card">
@@ -216,9 +227,18 @@
             <button id="btn-show-state">Debug State</button>
           </div>
         </div>
+
+        <div class="card">
+          <h2>Step 4: Share Secret</h2>
+          <div class="stack">
+            <button id="btn-check-requests">📬 Check Requests</button>
+            <button id="btn-share-secret">Share with User 2</button>
+            <button id="btn-revoke-access">❌ Revoke access from User 2</button>
+          </div>
+        </div>
       </div>
 
-      <div class="card">
+      <div class="card" style="width: 100%; margin-top: 20px;">
         <h2>Crypto Trace Log</h2>
         <div style="margin-top: 8px"><div class="pill"><span class="dot"></span><span>Proper password verification via DEK unwrapping</span></div></div>
         <pre id="log" class="log"></pre>
@@ -226,6 +246,39 @@
     </div>
 
     <script>
+      // ============================================================
+      // Zero‑Knowledge Vault Demo (Frontend)
+      //
+      // High‑level responsibilities (mirrors the Notion doc):
+      // - Flow 1: Onboarding – derive KEK (PBKDF2), generate ECDH keypair,
+      //   wrap private key with KEK, send salt + publicKey + wrappedPrivateKey.
+      // - Flow 2: Vault unlock – given master password, fetch salt +
+      //   wrappedPrivateKey from backend, re‑derive KEK, unwrap private key
+      //   and keep it in memory for this session only.
+      // - Flow 3: Create secret – generate per‑secret DEK, encrypt only
+      //   fields marked x‑ui‑encrypted, wrap DEK with owner public key,
+      //   send secretData + wrappedDEK + schemaType.
+      // - Flow 4: Share secret – owner unwraps DEK locally using their
+      //   private key, re‑wraps DEK with recipient public key, backend
+      //   stores an extra wrappedDEK for that user.
+      // - Flow 5: Recipient view – recipient unlocks vault (Flow 2),
+      //   fetches secretData + their wrappedDEK, unwraps DEK and decrypts
+      //   encrypted fields on demand.
+      // - Flow 6: Revoke access – owner deletes a recipient’s wrappedDEK,
+      //   so they can no longer unwrap the DEK (no cryptographic access).
+      // - Flow 7: Update secret – owner reuses the existing DEK to
+      //   re‑encrypt updated fields; wrappedDEKs remain valid.
+      //
+      // This file is organized as:
+      // 1. Crypto primitives (PBKDF2, AES‑GCM, ECDH).
+      // 2. Frontend state + DOM wiring.
+      // 3. Flow implementations (1‑7) in order.
+      // 4. Sharing / access‑request / revoke helpers.
+      // 5. Debug helpers (server state).
+      // ============================================================
+
+      // === 1. Crypto primitives (PBKDF2, AES‑GCM, ECDH) ===
+
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
       const IV_LENGTH = 12;
@@ -320,9 +373,118 @@
         return decoder.decode(ptBuf);
       }
 
+      // ECDH-based DEK wrapping for sharing (asymmetric)
+      // Clean JWK: remove 'use' and 'key_ops' fields that might conflict with different algorithms
+      function cleanJWK(jwk) {
+        const cleaned = { ...jwk };
+        delete cleaned.use;        // Remove algorithm restriction (e.g., "sig")
+        delete cleaned.key_ops;    // Remove operation restrictions
+        return cleaned;
+      }
+
+      // Wrap DEK using ECDH with recipient's public key and owner's private key
+      async function wrapDEKWithPublicKey(dekRaw, theirPublicKeyJwk, myPrivateKeyJwk) {
+        try {
+          // Import keys with cleaned JWK to avoid conflicts
+          const theirPublicKey = await crypto.subtle.importKey(
+            'jwk',
+            cleanJWK(theirPublicKeyJwk),  // Remove 'use' field that might say "sig"
+            { name: 'ECDH', namedCurve: 'P-256' },
+            false,
+            []  // No usages needed for public key in ECDH
+          );
+
+          const myPrivateKey = await crypto.subtle.importKey(
+            'jwk',
+            cleanJWK(myPrivateKeyJwk),
+            { name: 'ECDH', namedCurve: 'P-256' },
+            true,
+            ['deriveBits']
+          );
+
+          // ECDH key agreement
+          const sharedSecret = await crypto.subtle.deriveBits(
+            { name: 'ECDH', public: theirPublicKey },
+            myPrivateKey,
+            256
+          );
+
+          // Derive symmetric key from shared secret
+          const encryptionKey = await crypto.subtle.importKey(
+            'raw',
+            sharedSecret,
+            { name: 'AES-GCM' },
+            false,
+            ['encrypt']
+          );
+
+          // Encrypt DEK with derived key (same pattern as current)
+          const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+          const ct = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv },
+            encryptionKey,
+            dekRaw
+          );
+          return toBase64(pack(iv, ct));
+        } catch (err) {
+          throw new Error(`ECDH wrapping failed: ${err.message}`);
+        }
+      }
+
+      // Unwrap DEK using ECDH with my private key and their public key
+      async function unwrapDEKWithPrivateKey(wrappedDEKB64, myPrivateKeyJwk, theirPublicKeyJwk) {
+        try {
+          // Import keys with cleaned JWK
+          const theirPublicKey = await crypto.subtle.importKey(
+            'jwk',
+            cleanJWK(theirPublicKeyJwk),  // Remove 'use' field
+            { name: 'ECDH', namedCurve: 'P-256' },
+            false,
+            []
+          );
+
+          const myPrivateKey = await crypto.subtle.importKey(
+            'jwk',
+            cleanJWK(myPrivateKeyJwk),
+            { name: 'ECDH', namedCurve: 'P-256' },
+            true,
+            ['deriveBits']
+          );
+
+          // ECDH key agreement (same shared secret)
+          const sharedSecret = await crypto.subtle.deriveBits(
+            { name: 'ECDH', public: theirPublicKey },
+            myPrivateKey,
+            256
+          );
+
+          // Derive symmetric key from shared secret
+          const decryptionKey = await crypto.subtle.importKey(
+            'raw',
+            sharedSecret,
+            { name: 'AES-GCM' },
+            false,
+            ['decrypt']
+          );
+
+          // Decrypt DEK
+          const packed = fromBase64(wrappedDEKB64);
+          const { iv, ciphertext } = unpack(packed);
+          const dekRaw = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv },
+            decryptionKey,
+            ciphertext
+          );
+          return new Uint8Array(dekRaw);
+        } catch (err) {
+          throw new Error(`ECDH unwrapping failed: ${err.message}`);
+        }
+      }
+
       const state = {
         user1: { id: null, salt: null, kek: null, wrappedPrivateKey: null, publicKeyJwk: null, privateKeyJwk: null },
         user2: { id: null, salt: null, kek: null, wrappedPrivateKey: null, publicKeyJwk: null, privateKeyJwk: null },
+        currentUser: null,  // Currently logged-in user (user1 or user2)
         secretId: null,
         secretSchema: null,
         secretData: null,
@@ -344,8 +506,145 @@
       const btnCreateSecret = document.getElementById('btn-create-secret');
       const btnViewSecret = document.getElementById('btn-view-secret');
       const btnShowState = document.getElementById('btn-show-state');
+      const currentUserSelect = document.getElementById('current-user-select');
+      const currentUserInfo = document.getElementById('current-user-info');
+      const currentUserIdEl = document.getElementById('current-user-id');
+      const currentUserNameEl = document.getElementById('current-user-name');
 
-      // FLOW 1: User Onboarding - Master Password Setup
+      // FLOW 2: Vault unlock (Session)
+      // Mirrors doc Flow 2:
+      // - Frontend: user enters master password, we call backend to get
+      //   salt + wrappedPrivateKey, then derive KEK and unwrap the private
+      //   key in memory for this session.
+      // - Backend: simply returns what was stored at onboarding
+      //   (salt, wrappedPrivateKey, publicKey) – still no KEK or plaintext.
+      //
+      // This helper is used by verifyAndDecryptField to bootstrap Flow 2.
+      // Helper: fetch salt + wrappedPrivateKey + publicKey for Flow 2 (vault unlock)
+      async function fetchUnlockBootstrap(userId) {
+        const res = await fetch('/vault/unlock-bootstrap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || 'Failed to fetch unlock data');
+        }
+
+        return res.json();
+      }
+
+      // Open edit secret modal (owner-only – uses existing schema and secretData)
+      function openEditSecretModal() {
+        const schema = state.secretSchema;
+        const secretData = state.secretData;
+
+        if (!schema || !secretData) {
+          alert('No secret loaded to edit');
+          return;
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'edit-secret-modal';
+        modal.className = 'modal-overlay';
+
+        let formHTML = '<div style="display: flex; flex-direction: column; gap: 15px;">';
+
+        const sortedFields = Object.entries(schema.properties)
+          .sort((a, b) => (a[1]['x-ui-order'] || 0) - (b[1]['x-ui-order'] || 0));
+
+        for (const [fieldName, fieldDef] of sortedFields) {
+          const isEncrypted = fieldDef['x-ui-encrypted'];
+          const label = fieldDef.label || fieldName;
+          const currentValue = secretData[fieldName];
+          const id = `edit-field-${fieldName}`;
+
+          formHTML += `
+            <div class="form-group">
+              <div class="form-label">
+                <label for="${id}">${label}</label>
+                ${isEncrypted ? '<span class="encrypted-badge">🔒 encrypted – leave blank to keep existing</span>' : ''}
+              </div>
+          `;
+
+          if (fieldDef['x-ui-type'] === 'select' && fieldDef.enum && !isEncrypted) {
+            formHTML += `<select id="${id}">
+              ${fieldDef.enum.map(o => `<option value="${o}" ${currentValue === o ? 'selected' : ''}>${o}</option>`).join('')}
+            </select>`;
+          } else if (fieldDef['x-ui-type'] === 'textarea') {
+            formHTML += `<textarea id="${id}">${!isEncrypted ? (currentValue || '') : ''}</textarea>`;
+          } else {
+            const valueAttr = !isEncrypted ? (currentValue || '') : '';
+            const placeholder = isEncrypted ? '[unchanged]' : '';
+            formHTML += `<input type="text" id="${id}" value="${valueAttr}" placeholder="${placeholder}" />`;
+          }
+
+          formHTML += '</div>';
+        }
+
+        formHTML += `
+          <div class="form-group">
+            <div class="form-label">
+              <label for="edit-master-password">Master password</label>
+            </div>
+            <input type="password" id="edit-master-password" placeholder="Required to re-encrypt sensitive fields" />
+            <div id="edit-secret-error" class="error-message"></div>
+          </div>
+        `;
+
+        modal.innerHTML = `
+          <div class="modal">
+            <h3>✏️ Edit Secret</h3>
+            ${formHTML}
+            <div class="modal-buttons">
+              <button class="btn-secondary" id="btn-cancel-edit">Cancel</button>
+              <button class="btn-primary" id="btn-save-edit">Save changes</button>
+            </div>
+          </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        document.getElementById('btn-cancel-edit').addEventListener('click', () => {
+          document.getElementById('edit-secret-modal')?.remove();
+        });
+
+        document.getElementById('btn-save-edit').addEventListener('click', async () => {
+          await saveEditedSecret();
+        });
+      }
+
+      // Handle user selection
+      currentUserSelect.addEventListener('change', (e) => {
+        const selectedUser = e.target.value;
+        if (selectedUser === 'user1') {
+          state.currentUser = state.user1;
+          currentUserIdEl.textContent = state.user1.id;
+          currentUserNameEl.textContent = u1UsernameInput.value;
+          currentUserInfo.style.display = 'block';
+          log(`\n👤 Switched to User 1: ${state.user1.id} (${u1UsernameInput.value})\n`);
+        } else if (selectedUser === 'user2') {
+          state.currentUser = state.user2;
+          currentUserIdEl.textContent = state.user2.id;
+          currentUserNameEl.textContent = u2UsernameInput.value;
+          currentUserInfo.style.display = 'block';
+          log(`\n👤 Switched to User 2: ${state.user2.id} (${u2UsernameInput.value})\n`);
+        } else {
+          state.currentUser = null;
+          currentUserInfo.style.display = 'none';
+          log('\n👤 No user selected\n');
+        }
+      });
+
+      // FLOW 1: User Onboarding (Master Password Setup)
+      // Mirrors doc Flow 1:
+      // - Frontend: user enters master password, we generate salt,
+      //   derive KEK with PBKDF2(password + salt), generate ECDH keypair,
+      //   wrap private key with KEK, send salt + publicKey + wrappedPrivateKey.
+      // - Backend: stores (in-memory for this POC) username, kek_salt,
+      //   publicKey JWK, wrappedPrivateKey.
       btnRegister.addEventListener('click', async () => {
         try {
           log('\n═══════════════════════════════════════════════════════');
@@ -360,7 +659,7 @@
             log('❌ Error: User 1 master password is required');
             return;
           }
-          log(`📝 STEP 1: User 1 (Alice) - Master password entered`);
+          log(`📝 STEP 1: User 1 (Manish) - Master password entered`);
           log(`   Password length: ${masterPassword1.length} characters\n`);
 
           // ──────────────────────────────────────────────────────────
@@ -373,7 +672,7 @@
           // ──────────────────────────────────────────────────────────
           // STEP 3: Derive KEK via PBKDF2
           // ──────────────────────────────────────────────────────────
-          log(`🔑 STEP 3: Derive KEK via PBKDF2(password + salt, 250k iterations)`);
+          log(`🔑 STEP 3: Derive KEK via PBKDF2(password + salt, 600k iterations)`);
           const kek1 = await deriveKEK(masterPassword1, salt1);
           log(`   KEK derived successfully (stored in session memory)\n`);
 
@@ -429,7 +728,7 @@
           log(`✅ Backend: User registered with ID: ${data1.userId}\n`);
 
           // ──────────────────────────────────────────────────────────
-          // STEP 7: Store in frontend state
+          // STEP 7: Store in frontend state (session based store for 30 minutes)
           // ──────────────────────────────────────────────────────────
           state.user1.id = data1.userId;
           state.user1.salt = salt1;
@@ -458,7 +757,7 @@
           log('═══════════════════════════════════════════════════════\n');
 
           // ──────────────────────────────────────────────────────────
-          // Register User 2 (Bob) - Same Flow
+          // Register User 2 (Jason) - Same Flow
           // ──────────────────────────────────────────────────────────
           const masterPassword2 = u2PasswordInput.value;
           if (!masterPassword2) {
@@ -466,7 +765,7 @@
             return;
           }
 
-          log('📝 STEP 1: User 2 (Bob) - Master password entered');
+          log('📝 STEP 1: User 2 (Jason) - Master password entered');
           const salt2 = crypto.getRandomValues(new Uint8Array(16));
           log('🧂 STEP 2: Generated random salt (16 bytes)');
 
@@ -514,8 +813,16 @@
           u2PasswordInput.disabled = true;
           u2UsernameInput.disabled = true;
 
-          log(`✅ User 2 (Bob) registered: ${data2.userId}`);
+          log(`✅ User 2 (Jason) registered: ${data2.userId}`);
           log('═══════════════════════════════════════════════════════\n');
+
+          // Populate user selector dropdown
+          currentUserSelect.innerHTML = `
+            <option value="">-- Select a user --</option>
+            <option value="user1">${state.user1.id} - ${u1UsernameInput.value}</option>
+            <option value="user2">${state.user2.id} - ${u2UsernameInput.value}</option>
+          `;
+          log('👤 User selector ready - Choose a user to continue\n');
 
         } catch (err) {
           log('❌ Error: ' + err.message);
@@ -525,7 +832,7 @@
 
       btnCreateSecret.addEventListener('click', async () => {
         try {
-          if (!state.user1.id) { alert('Register first'); return; }
+          if (!state.currentUser) { alert('Select a user first'); return; }
           log('📋 Creating secret...');
           const schemaType = schemaTypeSelect.value;
           const schemaRes = await fetch(`/schemas/${schemaType}`);
@@ -566,19 +873,19 @@
           loginCredentials: {
             ProviderName: 'Gmail',
             Website: 'https://mail.google.com',
-            Username: 'alice@gmail.com',
-            Password: 'SecurePass123!@#',
+            Username: 'manish@gmail.com',
+            Password: 'ManishSecure123!@#',
             '2FAMethod': 'Authenticator App',
-            '2FADetails': 'JBSWY3DPEBLW64TMMQ======',
-            Notes: 'Primary email account',
+            '2FADetails': 'MANISH2FAKEY123456',
+            Notes: 'Manish primary email account',
           },
           bankAccount: {
-            AccountName: 'Savings Account',
-            BankName: 'First Bank',
-            AccountNumber: '9876543210',
+            AccountName: 'Manish Checking Account',
+            BankName: 'ICICI Bank',
+            AccountNumber: '1234567890123456',
             RoutingNumber: '021000021',
             PIN: '1234',
-            Notes: 'Main savings',
+            Notes: 'Manish checking account',
           },
         };
 
@@ -591,6 +898,15 @@
         }
       }
 
+      // FLOW 3: Create secret (Owner)
+      // Mirrors doc Flow 3:
+      // - Frontend: generate a random per‑secret DEK, encrypt only fields
+      //   marked x‑ui‑encrypted with AES‑GCM using that DEK, then wrap the
+      //   DEK with the owner’s public key (ECDH → AES‑GCM). Send the mixed
+      //   plaintext/ciphertext secretData plus wrappedDEK + schemaType.
+      // - Backend: validates plaintext against the schema, stores the
+      //   secretData and a single wrappedDEK entry for the owner
+      //   (in-memory vaultItems + wrappedDEKs for this POC).
       async function saveSecret(schemaType) {
         try {
           const householdId = householdInput.value;
@@ -633,9 +949,14 @@
             log(`   ${fieldName}: ${isEncrypted ? '[ENCRYPTED]' : '[PLAINTEXT]'} ${preview}`);
           }
 
-          // Step 4: Wrap DEK with KEK
-          const wrappedDEK = await wrapDEKWithKEK(dekRaw, state.user1.kek);
-          log('\n🔑 Wrapped DEK with KEK');
+          // Step 4: Wrap DEK with owner's public key using ECDH
+          log(`\n🔑 Wrapping DEK with owner public key (ECDH)...`);
+          const wrappedDEK = await wrapDEKWithPublicKey(
+            dekRaw,
+            state.currentUser.publicKeyJwk,      // recipient = owner themselves
+            state.currentUser.privateKeyJwk      // owner's private key
+          );
+          log('✅ DEK wrapped with ECDH (asymmetric)');
 
           // Step 5: Send to backend
           log(`\n📤 Sending to backend for schema validation...`);
@@ -644,7 +965,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               householdId,
-              ownerId: state.user1.id,
+              ownerId: state.currentUser.id,
               secretData, // Mix of plaintext + encrypted fields
               wrappedDEK,
               schemaType,
@@ -681,11 +1002,20 @@
           const accessRes = await fetch('/vault/access', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ itemId: state.secretId, userId: state.user1.id }),
+            body: JSON.stringify({ itemId: state.secretId, userId: state.currentUser.id }),
           });
           
           if (!accessRes.ok) {
             const err = await accessRes.json();
+            
+            // Handle "No access" case - show request button
+            if (accessRes.status === 401) {
+              log(`⚠️  No access to this secret`);
+              log(`   You can request access from the owner\n`);
+              showNoAccessModal(state.secretId, state.currentUser.id);
+              return;
+            }
+            
             throw new Error(err.error);
           }
 
@@ -714,6 +1044,58 @@
         }
       });
 
+      // Show modal when user has no access to secret
+      function showNoAccessModal(itemId, userId) {
+        const modal = document.createElement('div');
+        modal.className = 'modal-overlay';
+        modal.id = 'no-access-modal';
+
+        modal.innerHTML = `
+          <div class="modal">
+            <h3>🔒 No Access</h3>
+            <p style="color: #8fa3cc; margin-bottom: 20px;">You don't have access to this secret. You can request access from the owner and they can grant it.</p>
+            <div class="modal-buttons">
+              <button class="btn-secondary" onclick="document.getElementById('no-access-modal').remove();">Cancel</button>
+              <button class="btn-primary" id="btn-request-access">📬 Request Access</button>
+            </div>
+          </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        document.getElementById('btn-request-access').addEventListener('click', async () => {
+          try {
+            log(`\n📬 Sending access request...`);
+            const reqRes = await fetch('/vault/request-access', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ itemId, userId }),
+            });
+
+            if (!reqRes.ok) {
+              const err = await reqRes.json();
+              throw new Error(err.error);
+            }
+
+            log(`✅ Access request sent to owner`);
+            log(`   Owner will review and grant access\n`);
+            document.getElementById('no-access-modal').remove();
+          } catch (err) {
+            log(`❌ Request failed: ${err.message}\n`);
+            console.error(err);
+          }
+        });
+      }
+
+      // FLOW 5: Recipient views secret
+      // Mirrors doc Flow 5:
+      // - Frontend: after vault unlock, fetch secretData + schema from
+      //   /vault/access and show plaintext + encrypted fields. For an
+      //   encrypted field, when the user clicks “Reveal” we fetch that
+      //   user’s wrappedDEK, unwrap the DEK with their private key and
+      //   decrypt just that field in the browser.
+      // - Backend: only ever returns stored secretData (plaintext +
+      //   ciphertext mix) and per‑user wrappedDEKs – never the DEK itself.
       function renderSecretViewModal(schema, secretData) {
         const modal = document.createElement('div');
         modal.className = 'modal-overlay';
@@ -764,6 +1146,7 @@
             ${formHTML}
             <div class="modal-buttons">
               <button class="btn-secondary" onclick="document.getElementById('view-secret-modal').remove();">Close</button>
+              <button class="btn-primary" id="btn-edit-secret">Edit</button>
             </div>
           </div>
         `;
@@ -777,6 +1160,19 @@
             openMasterPasswordModal(fieldName);
           });
         });
+
+        // Attach Edit handler (owner only – demo assumes User 1 as owner)
+        const editBtn = document.getElementById('btn-edit-secret');
+        if (editBtn) {
+          if (!state.currentUser || !state.user1 || state.currentUser.id !== state.user1.id) {
+            editBtn.style.display = 'none';
+          } else {
+            editBtn.addEventListener('click', () => {
+              document.getElementById('view-secret-modal')?.remove();
+              openEditSecretModal();
+            });
+          }
+        }
       }
 
       function openMasterPasswordModal(fieldName) {
@@ -838,6 +1234,12 @@
         document.getElementById('modal-password').focus();
       }
 
+      // FLOW 2 (continued) + part of Flow 5:
+      // - Implements password verification via wrappedPrivateKey unwrapping
+      //   and then field‑level decryption for a single encrypted field.
+      // - This is where we actually run PBKDF2(password + salt) → KEK,
+      //   unwrap the private key (Flow 2), then fetch and unwrap the DEK
+      //   for the current user and decrypt one field (Flow 5).
       async function verifyAndDecryptField() {
         const masterPassword = document.getElementById('modal-password').value;
         const errorEl = document.getElementById('modal-error');
@@ -851,45 +1253,103 @@
         try {
           log(`\n🔑 Password verification for field: ${fieldName}`);
           
-          // Step 1: Derive KEK from entered password + salt
-          const derivedKEK = await deriveKEK(masterPassword, state.user1.salt);
-          log(`✅ Step 1: KEK derived from password via PBKDF2`);
+          // Step 1: Fetch salt + wrappedPrivateKey from backend (Flow 2 unlock bootstrap)
+          log(`📥 Step 1: Fetching salt + wrappedPrivateKey from backend...`);
+          const unlockData = await fetchUnlockBootstrap(state.currentUser.id);
 
-          // Step 2: CRITICAL - Verify password by unwrapping wrappedPrivateKey
+          // Step 2: Derive KEK from entered password + salt
+          const saltBytes = fromBase64(unlockData.salt);
+          const derivedKEK = await deriveKEK(masterPassword, saltBytes);
+          log(`✅ Step 2: KEK derived from password via PBKDF2`);
+
+          // Step 3: CRITICAL - Verify password by unwrapping wrappedPrivateKey
           // wrappedPrivateKey is proof of password ownership
           // If password WRONG: derived KEK ≠ original KEK → AES-GCM decryption FAILS
           // If password CORRECT: derived KEK = original KEK → AES-GCM decryption SUCCEEDS
-          log(`🔓 Step 2: Verifying password by unwrapping wrappedPrivateKey...`);
+          log(`🔓 Step 3: Verifying password by unwrapping wrappedPrivateKey...`);
           let verifiedPrivateKey;
           try {
-            verifiedPrivateKey = await decryptPayload(state.user1.wrappedPrivateKey, derivedKEK);
+            verifiedPrivateKey = await decryptPayload(unlockData.wrappedPrivateKey, derivedKEK);
             log(`✅ Password VERIFIED - wrappedPrivateKey unwrapped successfully!`);
           } catch (unwrapErr) {
             throw new Error(`Invalid master password - verification failed`);
           }
 
-          // Step 3: Password verified! Now fetch wrappedDEK from backend
-          log(`📤 Step 3: Fetching wrappedDEK from backend (on-demand)...`);
+          // Step 4: Password verified! Now fetch wrappedDEK from backend
+          log(`📤 Step 4: Fetching wrappedDEK from backend (on-demand)...`);
           const dekResponse = await fetch('/vault/get-wrapped-dek', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               itemId: state.secretId,
-              userId: state.user1.id,
+              userId: state.currentUser.id,
             }),
           });
 
           if (!dekResponse.ok) {
             const errData = await dekResponse.json();
-            throw new Error(errData.error || 'Failed to fetch wrapped DEK');
+            
+            // Handle "No access" case inline in the unlock modal
+            if (dekResponse.status === 401) {
+              log(`⚠️ No access to encrypted fields`);
+              log(`   You can request access from the owner\n`);
+
+              const modalError = document.getElementById('modal-error');
+              const verifyBtn = document.getElementById('btn-verify-password');
+              const passwordInput = document.getElementById('modal-password');
+
+              // Clear password input – no need after access check
+              if (passwordInput) passwordInput.value = '';
+
+              // Inform user they lack access
+              if (modalError) {
+                modalError.textContent = 'You do not have access to view this field. You can request access from the owner.';
+              }
+
+              // Turn "Verify" into "Request access" button
+              if (verifyBtn) {
+                verifyBtn.textContent = 'Request access';
+                verifyBtn.onclick = async () => {
+                  try {
+                    log(`\n📬 Sending access request...`);
+                    const reqRes = await fetch('/vault/request-access', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        itemId: state.secretId,
+                        userId: state.currentUser.id,
+                      }),
+                    });
+
+                    if (!reqRes.ok) {
+                      const reqErr = await reqRes.json();
+                      throw new Error(reqErr.error || 'Request failed');
+                    }
+
+                    log(`✅ Access request sent to owner\n`);
+                    document.getElementById('master-password-modal')?.remove();
+                  } catch (reqErr) {
+                    log(`❌ Request failed: ${reqErr.message}\n`);
+                    if (modalError) {
+                      modalError.textContent = '❌ ' + reqErr.message;
+                    }
+                    console.error(reqErr);
+                  }
+                };
+              }
+
+              return;
+            }
+
+            throw new Error(errData.error || 'Failed to fetch DEK');
           }
 
           const dekData = await dekResponse.json();
-          log(`✅ Received wrappedDEK from backend`);
-
-          // Step 4: Unwrap DEK with verified KEK
-          log(`🔓 Step 4: Unwrapping DEK with verified KEK...`);
-          const dekRaw = await unwrapDEKWithKEK(dekData.wrappedDEK, derivedKEK);
+          const dekRaw = await unwrapDEKWithPrivateKey(
+            dekData.wrappedDEK,
+            state.currentUser.privateKeyJwk,
+            dekData.ownerPublicKey
+          );
           const dekKey = await importDEK(dekRaw);
           log(`✅ DEK unwrapped successfully`);
           // NOTE: DEK is NOT stored in state - only used locally for decryption
@@ -916,6 +1376,125 @@
         }
       }
 
+      // FLOW 7: Update secret (reuse existing DEK)
+      // Mirrors the Option A update flow:
+      // - Frontend: owner re‑verifies their password, unwraps their
+      //   wrappedDEK to recover the existing per‑secret DEK, and uses that
+      //   same DEK to re‑encrypt any changed encrypted fields. Encrypted
+      //   fields left blank keep their old ciphertext.
+      // - Backend: /vault/update only overwrites secretData; it does not
+      //   touch wrappedDEKs, so all existing per‑user wrapped DEKs stay
+      //   valid and can still unwrap the same DEK for the updated secret.
+      // Save edited secret – reuse existing DEK so wrappedDEKs stay valid
+      async function saveEditedSecret() {
+        const errorEl = document.getElementById('edit-secret-error');
+        const masterPassword = document.getElementById('edit-master-password').value;
+
+        if (!masterPassword) {
+          if (errorEl) errorEl.textContent = 'Enter your master password';
+          return;
+        }
+
+        try {
+          if (!state.currentUser || !state.secretId || !state.secretSchema || !state.secretData) {
+            throw new Error('Missing secret or user context');
+          }
+
+          log('\n✏️ Updating secret with existing DEK...');
+
+          // Step 1: Verify master password by unwrapping wrappedPrivateKey
+          log('🔑 Step 1: Verifying master password...');
+          const derivedKEK = await deriveKEK(masterPassword, state.currentUser.salt);
+          try {
+            await decryptPayload(state.currentUser.wrappedPrivateKey, derivedKEK);
+            log('✅ Password VERIFIED for update');
+          } catch (e) {
+            throw new Error('Invalid master password - update aborted');
+          }
+
+          // Step 2: Fetch owner wrappedDEK
+          log('📤 Step 2: Fetching owner wrappedDEK...');
+          const dekFetchRes = await fetch('/vault/get-wrapped-dek', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              itemId: state.secretId,
+              userId: state.currentUser.id,
+            }),
+          });
+
+          if (!dekFetchRes.ok) {
+            const err = await dekFetchRes.json();
+            throw new Error(err.error || 'Failed to fetch wrapped DEK for update');
+          }
+
+          const dekData = await dekFetchRes.json();
+
+          // Step 3: Unwrap DEK using owner's ECDH keys (same DEK as create/share)
+          log('🔓 Step 3: Unwrapping DEK with owner private key...');
+          const dekRaw = await unwrapDEKWithPrivateKey(
+            dekData.wrappedDEK,
+            state.currentUser.privateKeyJwk,
+            dekData.ownerPublicKey
+          );
+          const dekKey = await importDEK(dekRaw);
+          log('✅ DEK unwrapped for update (reusing existing DEK)');
+
+          // Step 4: Build updated secretData (reuse ciphertext when encrypted fields left blank)
+          const schema = state.secretSchema;
+          const updatedSecretData = {};
+
+          for (const [fieldName, fieldDef] of Object.entries(schema.properties)) {
+            const isEncrypted = fieldDef['x-ui-encrypted'];
+            const el = document.getElementById(`edit-field-${fieldName}`);
+            const inputValue = el ? el.value : '';
+
+            if (isEncrypted) {
+              if (!inputValue) {
+                // Keep existing ciphertext if left blank
+                updatedSecretData[fieldName] = state.secretData[fieldName];
+                log(`   🔁 Kept existing ciphertext for ${fieldName}`);
+              } else {
+                const encryptedValue = await encryptField(inputValue, dekKey);
+                updatedSecretData[fieldName] = encryptedValue;
+                log(`   🔐 Re-encrypted field: ${fieldName}`);
+              }
+            } else {
+              updatedSecretData[fieldName] = inputValue;
+              log(`   ✏️ Updated plaintext field: ${fieldName}`);
+            }
+          }
+
+          // Step 5: Send update to backend (DEK + wrappedDEKs unchanged)
+          log('📤 Step 5: Sending updated secret to backend...');
+          const updateRes = await fetch('/vault/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              itemId: state.secretId,
+              ownerId: state.currentUser.id,
+              secretData: updatedSecretData,
+            }),
+          });
+
+          if (!updateRes.ok) {
+            const err = await updateRes.json();
+            throw new Error(err.error || 'Update failed');
+          }
+
+          const updateData = await updateRes.json();
+          log(`✅ Secret updated (itemId: ${updateData.itemId}) – DEK reused, wrappedDEKs unchanged\n`);
+
+          // Update local state and close modal
+          state.secretData = updatedSecretData;
+          document.getElementById('edit-secret-modal')?.remove();
+        } catch (err) {
+          console.error(err);
+          if (errorEl) errorEl.textContent = '❌ ' + err.message;
+          log(`❌ Secret update FAILED: ${err.message}\n`);
+        }
+      }
+
       btnShowState.addEventListener('click', async () => {
         try {
           const res = await fetch('/debug/state');
@@ -925,6 +1504,447 @@
           log('❌ Error: ' + err.message);
         }
       });
+
+      // Add references to new buttons
+      const btnCheckRequests = document.getElementById('btn-check-requests');
+      const btnShareSecret = document.getElementById('btn-share-secret');
+      const btnRevokeAccess = document.getElementById('btn-revoke-access');
+
+      // Check for pending access requests (owner view)
+      btnCheckRequests.addEventListener('click', async () => {
+        try {
+          if (!state.secretId) { alert('Create secret first'); return; }
+          log('\n📬 Checking pending requests...');
+          
+          const reqRes = await fetch('/vault/pending-requests', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ itemId: state.secretId, ownerId: state.currentUser.id }),
+          });
+
+          if (!reqRes.ok) {
+            const err = await reqRes.json();
+            throw new Error(err.error);
+          }
+
+          const reqData = await reqRes.json();
+          log(`✅ Found ${reqData.count} pending request(s)\n`);
+
+          if (reqData.count === 0) {
+            log('No pending requests');
+            return;
+          }
+
+          for (const req of reqData.requests) {
+            log(`   📥 ${req.username} (${req.userId}) - Requested: ${new Date(req.requestedAt).toLocaleString()}`);
+          }
+          log('');
+
+          showPendingRequestsModal(state.secretId, reqData.requests);
+        } catch (err) {
+          log('❌ Error: ' + err.message);
+          console.error(err);
+        }
+      });
+
+      // FLOW 4: Share secret (key sharing between people)
+      // Mirrors doc Flow 4:
+      // - Frontend: owner’s private key is already in memory from Flow 2.
+      //   To share, we fetch the owner’s wrappedDEK, unwrap the DEK with
+      //   their private key, fetch the recipient’s public key and re‑wrap
+      //   the same DEK for the recipient. The UI entry here is a simple
+      //   “Share with User 2” button for the demo.
+      // - Backend: stores an extra wrappedDEK entry for the recipient in
+      //   wrappedDEKs[itemId][recipientUserId], similar to secret_access.
+      // Share secret with User 2 (owner approves)
+      btnShareSecret.addEventListener('click', async () => {
+        try {
+          if (!state.secretId) { alert('Create secret first'); return; }
+          if (!state.user2.id) { alert('Register User 2 first'); return; }
+          
+          log('\n🔐 Sharing secret with Jason...');
+          log(`   Secret: ${state.secretId}`);
+          log(`   Owner: manish (${state.user1.id})`);
+          log(`   Recipient: jason (${state.user2.id})\n`);
+          
+          showShareApprovalModal(state.secretId, state.user2.id);
+        } catch (err) {
+          log('❌ Error: ' + err.message);
+          console.error(err);
+        }
+      });
+
+      // FLOW 6: Revoke access
+      // Mirrors doc Flow 6:
+      // - Frontend: owner opens a revoke dialog that lists secrets they
+      //   own and all users who currently have a wrappedDEK for each
+      //   secret. Clicking “×” next to a user/secret calls revokeAccess.
+      // - Backend: /vault/revoke-access deletes the wrappedDEK for that
+      //   (itemId, userId) pair. Without a wrappedDEK a user can no longer
+      //   unwrap the DEK, so they lose cryptographic access even if they
+      //   still see ciphertext.
+      // Revoke access (owner) – open modal listing secrets and users
+      btnRevokeAccess.addEventListener('click', async () => {
+        try {
+          if (!state.currentUser) {
+            alert('Select an owner user first');
+            return;
+          }
+          await openRevokeAccessModal();
+        } catch (err) {
+          console.error(err);
+        }
+      });
+
+      // Show pending requests modal
+      function showPendingRequestsModal(itemId, requests) {
+        const modal = document.createElement('div');
+        modal.className = 'modal-overlay';
+        modal.id = 'pending-requests-modal';
+
+        let requestsHTML = '<div style="display: flex; flex-direction: column; gap: 10px;">';
+        for (const req of requests) {
+          requestsHTML += `
+            <div style="border: 1px solid #303a5e; padding: 10px; border-radius: 4px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <label style="font-weight: bold; color: #a8d5ff;">${req.username}</label>
+                <small style="color: #8fa3cc;">${new Date(req.requestedAt).toLocaleString()}</small>
+              </div>
+              <button class="btn-approve" data-user-id="${req.userId}" 
+                style="padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;">
+                ✅ Approve
+              </button>
+            </div>
+          `;
+        }
+        requestsHTML += '</div>';
+
+        modal.innerHTML = `
+          <div class="modal">
+            <h3>📬 Pending Access Requests</h3>
+            ${requestsHTML}
+            <div class="modal-buttons">
+              <button class="btn-secondary" onclick="document.getElementById('pending-requests-modal').remove();">Close</button>
+            </div>
+          </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        // Add approve handlers
+        document.querySelectorAll('.btn-approve').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            const requesterUserId = e.target.getAttribute('data-user-id');
+            showShareApprovalModal(itemId, requesterUserId);
+            document.getElementById('pending-requests-modal').remove();
+          });
+        });
+      }
+
+      // Show approval modal (owner enters password, then shares)
+      function showShareApprovalModal(itemId, recipientUserId) {
+        const modal = document.createElement('div');
+        modal.id = 'share-approval-modal';
+        modal.style.cssText = `
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          background: rgba(0,0,0,0.7);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 2000;
+        `;
+
+        const recipientName = recipientUserId === state.user2.id ? state.user2.id : 'User';
+
+        modal.innerHTML = `
+          <div style="
+            background: #1a2847;
+            padding: 30px;
+            border-radius: 8px;
+            width: 400px;
+            border: 1px solid #262f4d;
+          ">
+            <h3 style="color: #f5f7ff; margin-bottom: 16px;">🤝 Share Secret</h3>
+            <p style="color: #8fa3cc; margin-bottom: 20px;">Enter your master password to approve sharing this secret with <strong>${recipientName}</strong></p>
+            <input type="password" id="share-password" placeholder="Master password" 
+              style="width: 100%; padding: 10px; border: 1px solid #303a5e; border-radius: 4px; box-sizing: border-box; margin-bottom: 10px; background: #0f1425; color: #f5f7ff;" 
+              autofocus />
+            <div id="share-error" style="color: #ff6b6b; margin-bottom: 10px; font-size: 12px;"></div>
+            <div style="display: flex; gap: 10px;">
+              <button id="btn-approve-share" 
+                style="flex: 1; padding: 10px; background: linear-gradient(135deg, #4f7dff, #8f67ff); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;">
+                Approve & Share
+              </button>
+              <button id="btn-cancel-share" 
+                style="flex: 1; padding: 10px; background: #6a7a99; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;">
+                Cancel
+              </button>
+            </div>
+          </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        document.getElementById('btn-approve-share').addEventListener('click', async () => {
+          await approveAndShareSecret(itemId, recipientUserId);
+        });
+
+        document.getElementById('btn-cancel-share').addEventListener('click', () => {
+          modal.remove();
+        });
+
+        document.getElementById('share-password').focus();
+      }
+
+      // Approve sharing: verify owner password, unwrap DEK owner version, rewrap for recipient (Flow 4 inner steps)
+      async function approveAndShareSecret(itemId, recipientUserId) {
+        const masterPassword = document.getElementById('share-password').value;
+        const errorEl = document.getElementById('share-error');
+
+        if (!masterPassword) {
+          errorEl.textContent = 'Enter your master password';
+          return;
+        }
+
+        try {
+          log('\n🤝 Approving & sharing secret...');
+          
+          // Step 1: Verify owner password
+          log(`✅ Step 1: Verifying owner password...`);
+          const derivedKEK = await deriveKEK(masterPassword, state.currentUser.salt);
+          
+          try {
+            await decryptPayload(state.currentUser.wrappedPrivateKey, derivedKEK);
+            log(`✅ Password VERIFIED`);
+          } catch (err) {
+            throw new Error(`Invalid password - verification failed`);
+          }
+
+          // Step 2: Fetch owner's wrapped DEK
+          log(`📤 Step 2: Fetching wrapped DEK from backend...`);
+          const dekFetchRes = await fetch('/vault/get-wrapped-dek', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ itemId, userId: state.currentUser.id }),
+          });
+
+          if (!dekFetchRes.ok) {
+            const err = await dekFetchRes.json();
+            throw new Error(err.error || 'Failed to fetch wrapped DEK');
+          }
+
+          const dekData = await dekFetchRes.json();
+          log(`✅ Received wrapped DEK`);
+
+          // Step 3: Unwrap DEK using owner's ECDH (private key + owner's public key)
+          log(`🔓 Step 3: Unwrapping DEK with owner's private key...`);
+          const dekRaw = await unwrapDEKWithPrivateKey(
+            dekData.wrappedDEK,
+            state.currentUser.privateKeyJwk,      // Owner's private key
+            state.currentUser.publicKeyJwk        // Owner's public key
+          );
+          log(`✅ DEK unwrapped`);
+
+          // Step 4: Get recipient's public key
+          log(`📥 Step 4: Fetching recipient's public key...`);
+          // For demo: we already have recipient in state
+          const recipientPublicKey = state.user2.publicKeyJwk;
+          if (!recipientPublicKey) {
+            throw new Error('Recipient public key not available');
+          }
+          log(`✅ Got recipient public key`);
+
+          // Step 5: Rewrap DEK for recipient using ECDH (recipient's public key + owner's private key)
+          log(`🔐 Step 5: Rewrapping DEK for recipient...`);
+          const wrappedDEKForRecipient = await wrapDEKWithPublicKey(
+            dekRaw,
+            recipientPublicKey,             // Recipient's public key
+            state.currentUser.privateKeyJwk      // Owner's private key
+          );
+          log(`✅ DEK rewrapped for recipient`);
+
+          // Step 6: Send to backend to grant access
+          log(`📤 Step 6: Granting access on backend...`);
+          const approveRes = await fetch('/vault/approve-access', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              itemId,
+              requesterUserId: recipientUserId,
+              wrappedDEKForRequester: wrappedDEKForRecipient,
+            }),
+          });
+
+          if (!approveRes.ok) {
+            const err = await approveRes.json();
+            throw new Error(err.error || 'Approval failed');
+          }
+
+          log(`✅ Access granted! Recipient can now view the secret\n`);
+          document.getElementById('share-approval-modal').remove();
+
+        } catch (err) {
+          console.error(err);
+          errorEl.textContent = '❌ ' + err.message;
+          log(`❌ Sharing FAILED: ${err.message}\n`);
+        }
+      }
+    </script>
+
+    <script>
+      // FLOW 6: Revoke access from a user
+      async function revokeAccess(itemId, revokeUserId) {
+        try {
+          log(`\n❌ Revoking access...`);
+          log(`   Secret: ${itemId}`);
+          log(`   Revoke User: ${revokeUserId}\n`);
+
+          const revokeRes = await fetch('/vault/revoke-access', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              itemId,
+              ownerId: state.currentUser.id,
+              revokeUserId,
+            }),
+          });
+
+          if (!revokeRes.ok) {
+            const err = await revokeRes.json();
+            throw new Error(err.error);
+          }
+
+          const revokeData = await revokeRes.json();
+          log(`✅ ${revokeData.message}`);
+          log(`   User ${revokeData.revokedUsername} can NO LONGER decrypt this secret\n`);
+
+          return true;
+        } catch (err) {
+          log(`❌ Revoke failed: ${err.message}\n`);
+          console.error(err);
+          return false;
+        }
+      }
+
+      // Owner-facing modal: list secrets + users with access, allow revocation via X button
+      async function openRevokeAccessModal() {
+        try {
+          log('\n❌ Opening revoke access dialog...');
+          const res = await fetch('/debug/state');
+          if (!res.ok) {
+            throw new Error('Failed to load server state');
+          }
+          const { users, vaultItems, wrappedDEKs } = await res.json();
+
+          const ownerId = state.currentUser.id;
+          if (!ownerId) {
+            alert('No current owner selected');
+            return;
+          }
+
+          // Build a list of secrets owned by current user and their grantees
+          const entries = [];
+          for (const [itemId, item] of Object.entries(vaultItems || {})) {
+            if (item.ownerId !== ownerId) continue;
+            const grants = wrappedDEKs?.[itemId] || {};
+            for (const [userId, wrapped] of Object.entries(grants)) {
+              if (!wrapped) continue;
+              if (userId === ownerId) continue; // skip self
+              const user = users[userId];
+              entries.push({
+                itemId,
+                userId,
+                username: user?.username || userId,
+                householdId: item.householdId,
+                schemaType: item.schemaType,
+              });
+            }
+          }
+
+          if (entries.length === 0) {
+            alert('No users currently have delegated access to your secrets.');
+            return;
+          }
+
+          const existing = document.getElementById('revoke-access-modal');
+          if (existing) existing.remove();
+
+          const modal = document.createElement('div');
+          modal.id = 'revoke-access-modal';
+          modal.className = 'modal-overlay';
+
+          let rows = '';
+          for (const entry of entries) {
+            rows += `
+              <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #303a5e;">
+                <div style="font-size: 13px;">
+                  <div><strong>Secret:</strong> ${entry.itemId} <span style="color:#8fa3cc;">(${entry.schemaType || 'unknown'})</span></div>
+                  <div style="color:#8fa3cc; font-size:12px;">Household: ${entry.householdId || '-'}</div>
+                  <div style="margin-top:4px;">User: <strong>${entry.username}</strong> <span style="color:#8fa3cc;">(${entry.userId})</span></div>
+                </div>
+                <button 
+                  data-item-id="${entry.itemId}"
+                  data-user-id="${entry.userId}"
+                  style="
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 50%;
+                    border: 1px solid #ff6b6b;
+                    background: rgba(255,107,107,0.1);
+                    color: #ff6b6b;
+                    font-weight: bold;
+                    cursor: pointer;
+                  "
+                  title="Revoke access from this user">
+                  ×
+                </button>
+              </div>
+            `;
+          }
+
+          modal.innerHTML = `
+            <div class="modal">
+              <h3>❌ Revoke Access</h3>
+              <p>Click the <strong>×</strong> next to a user to remove their ability to decrypt that secret.</p>
+              <div style="margin-top: 12px; max-height: 320px; overflow-y: auto;">
+                ${rows}
+              </div>
+              <div class="modal-buttons">
+                <button class="btn-secondary" onclick="document.getElementById('revoke-access-modal').remove();">Close</button>
+              </div>
+            </div>
+          `;
+
+          document.body.appendChild(modal);
+
+          // Wire up revoke buttons
+          modal.querySelectorAll('button[data-item-id]').forEach((btn) => {
+            btn.addEventListener('click', async (e) => {
+              const itemId = e.currentTarget.getAttribute('data-item-id');
+              const userId = e.currentTarget.getAttribute('data-user-id');
+              if (!itemId || !userId) return;
+
+              const confirmed = confirm(`Revoke access for user ${userId} on secret ${itemId}?`);
+              if (!confirmed) return;
+
+              const ok = await revokeAccess(itemId, userId);
+              if (ok) {
+                // Remove row from UI
+                const row = e.currentTarget.parentElement;
+                row?.remove();
+              }
+            });
+          });
+        } catch (err) {
+          log(`❌ Failed to open revoke dialog: ${err.message}\n`);
+          console.error(err);
+          alert('Failed to open revoke dialog: ' + err.message);
+        }
+      }
     </script>
   </body>
 </html>

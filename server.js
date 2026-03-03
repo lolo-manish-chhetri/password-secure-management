@@ -11,6 +11,7 @@ app.use(bodyParser.json());
 const users = {}; // userId -> { username, salt, publicKey }
 const vaultItems = {}; // itemId -> { householdId, ownerId, secretData, schemaType }
 const wrappedDEKs = {}; // itemId -> { userId: wrappedDEK }
+const accessRequests = {}; // itemId -> { userId: requestedAt (timestamp) }
 
 // Helper: Check if string is valid base64
 function isBase64(str) {
@@ -251,6 +252,32 @@ app.post('/register', (req, res) => {
   }
 });
 
+// FLOW 2: Vault unlock bootstrap - fetch salt + wrappedPrivateKey + publicKey
+app.post('/vault/unlock-bootstrap', (req, res) => {
+  try {
+    const { userId } = req.body || {};
+
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+
+    const user = users[userId];
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Only return cryptographic bootstrap data needed for PBKDF2 + unwrap
+    res.json({
+      salt: user.salt,                 // kek_salt
+      wrappedPrivateKey: user.wrappedPrivateKey,
+      publicKey: user.publicKey,
+    });
+  } catch (err) {
+    console.error('❌ Unlock bootstrap error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // Get schema by type
 app.get('/schemas/:schemaType', (req, res) => {
   const { schemaType } = req.params;
@@ -313,6 +340,50 @@ app.post('/vault/create', (req, res) => {
   }
 });
 
+// Update existing vault item (reuse existing DEK / wrappedDEKs)
+app.post('/vault/update', (req, res) => {
+  try {
+    const { itemId, ownerId, secretData } = req.body || {};
+
+    if (!itemId || !ownerId || !secretData) {
+      return res.status(400).json({
+        error: 'itemId, ownerId, and secretData are required',
+      });
+    }
+
+    const existingItem = vaultItems[itemId];
+    if (!existingItem) {
+      return res.status(404).json({ error: 'Item not found' });
+    }
+
+    if (existingItem.ownerId !== ownerId) {
+      return res.status(401).json({ error: 'Only owner can update secret' });
+    }
+
+    const schemaType = existingItem.schemaType;
+
+    // Validate new secretData against the same schema
+    validateSecretAgainstSchema(secretData, schemaType);
+
+    // Overwrite secretData, keep DEK and wrappedDEKs as-is
+    vaultItems[itemId] = {
+      ...existingItem,
+      secretData,
+      updatedAt: new Date().toISOString(),
+    };
+
+    res.json({
+      success: true,
+      itemId,
+      schemaType,
+      updatedAt: vaultItems[itemId].updatedAt,
+    });
+  } catch (err) {
+    console.error('❌ Update error:', err.message);
+    return res.status(400).json({ error: err.message });
+  }
+});
+
 // Share vault item with another user
 app.post('/vault/share', (req, res) => {
   const { itemId, recipientId, wrappedDEKForRecipient } = req.body || {};
@@ -334,7 +405,9 @@ app.post('/vault/share', (req, res) => {
   res.json({ success: true });
 });
 
-// Access vault item: return secretData (plaintext + encrypted fields) + wrappedDEK + schema
+// Access vault item: return secretData (plaintext + encrypted fields) + schema
+// NOTE: NO access check here - show secrets to everyone
+// Access control happens in /vault/get-wrapped-dek when revealing encrypted fields
 app.post('/vault/access', (req, res) => {
   try {
     const { itemId, userId } = req.body;
@@ -347,20 +420,13 @@ app.post('/vault/access', (req, res) => {
     if (!item) {
       return res.status(404).json({ error: 'Item not found' });
     }
-
-    const dek = wrappedDEKs[itemId]?.[userId];
-    if (!dek) {
-      return res.status(401).json({ error: 'No access to this secret' });
-    }
-
     const schema = schemas[item.schemaType];
-    const ownerPublicKey = users[item.ownerId].publicKey;
 
     res.json({
       secretData: item.secretData, // Plaintext + encrypted fields as-is
       schema: schema,
-      ownerPublicKey: ownerPublicKey,
       // NOTE: wrappedDEK is NOT sent here - fetched on-demand via /vault/get-wrapped-dek after password verification
+      // NOTE: Access check happens in /vault/get-wrapped-dek when user tries to reveal encrypted fields
     });
   } catch (err) {
     console.error(err);
@@ -383,6 +449,7 @@ app.post('/vault/get-wrapped-dek', (req, res) => {
     }
 
     const wrappedDEK = wrappedDEKs[itemId]?.[userId];
+     const ownerPublicKey = users[item.ownerId].publicKey;
     if (!wrappedDEK) {
       return res.status(401).json({ error: 'No access to this secret' });
     }
@@ -391,6 +458,202 @@ app.post('/vault/get-wrapped-dek', (req, res) => {
       itemId,
       userId,
       wrappedDEK,
+      ownerPublicKey
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Request access to a vault item
+app.post('/vault/request-access', (req, res) => {
+  try {
+    const { itemId, userId } = req.body;
+    
+    if (!itemId || !userId) {
+      return res.status(400).json({ error: 'itemId and userId required' });
+    }
+
+    const item = vaultItems[itemId];
+    if (!item) {
+      return res.status(404).json({ error: 'Item not found' });
+    }
+
+    if (!users[userId]) {
+      return res.status(400).json({ error: 'User not found' });
+    }
+
+    // Don't allow self-requests
+    if (item.ownerId === userId) {
+      return res.status(400).json({ error: 'Cannot request access to own secret' });
+    }
+
+    // Create request if not already exists
+    if (!accessRequests[itemId]) {
+      accessRequests[itemId] = {};
+    }
+
+    if (accessRequests[itemId][userId]) {
+      return res.status(400).json({ error: 'Request already exists' });
+    }
+
+    accessRequests[itemId][userId] = new Date().toISOString();
+
+    console.log(`\n📬 Access Request: ${userId} requested access to ${itemId}`);
+    console.log(`   Owner: ${item.ownerId}`);
+    console.log(`   Requested At: ${accessRequests[itemId][userId]}\n`);
+
+    res.json({
+      success: true,
+      message: 'Access request sent to owner',
+      itemId,
+      userId,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Approve access and grant wrapped DEK to requester
+app.post('/vault/approve-access', (req, res) => {
+  try {
+    const { itemId, requesterUserId, wrappedDEKForRequester } = req.body;
+    
+    if (!itemId || !requesterUserId || !wrappedDEKForRequester) {
+      return res.status(400).json({ 
+        error: 'itemId, requesterUserId, and wrappedDEKForRequester are required' 
+      });
+    }
+
+    const item = vaultItems[itemId];
+    if (!item) {
+      return res.status(404).json({ error: 'Item not found' });
+    }
+
+    if (!users[requesterUserId]) {
+      return res.status(400).json({ error: 'Requester user not found' });
+    }
+
+    // Grant access by storing wrapped DEK for requester
+    if (!wrappedDEKs[itemId]) {
+      wrappedDEKs[itemId] = {};
+    }
+
+    wrappedDEKs[itemId][requesterUserId] = wrappedDEKForRequester;
+
+    // Remove from pending requests
+    if (accessRequests[itemId]) {
+      delete accessRequests[itemId][requesterUserId];
+    }
+
+    console.log(`\n✅ Access Approved: ${requesterUserId} now has access to ${itemId}`);
+    console.log(`   Owner: ${item.ownerId}`);
+    console.log(`   Wrapped DEK stored for requester\n`);
+
+    res.json({
+      success: true,
+      message: 'Access granted',
+      itemId,
+      requesterUserId,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get pending access requests for a secret (owner only)
+app.post('/vault/pending-requests', (req, res) => {
+  try {
+    const { itemId, ownerId } = req.body;
+    
+    if (!itemId || !ownerId) {
+      return res.status(400).json({ error: 'itemId and ownerId required' });
+    }
+
+    const item = vaultItems[itemId];
+    if (!item) {
+      return res.status(404).json({ error: 'Item not found' });
+    }
+
+    // Only owner can view requests
+    if (item.ownerId !== ownerId) {
+      return res.status(401).json({ error: 'Only owner can view requests' });
+    }
+
+    const requests = accessRequests[itemId] || {};
+    const requestList = Object.keys(requests).map(userId => ({
+      userId,
+      username: users[userId]?.username || 'Unknown',
+      requestedAt: requests[userId],
+    }));
+
+    res.json({
+      itemId,
+      requests: requestList,
+      count: requestList.length,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// FLOW 6: Revoke access to a vault item
+app.post('/vault/revoke-access', (req, res) => {
+  try {
+    const { itemId, ownerId, revokeUserId } = req.body;
+    
+    if (!itemId || !ownerId || !revokeUserId) {
+      return res.status(400).json({ 
+        error: 'itemId, ownerId, and revokeUserId are required' 
+      });
+    }
+
+    const item = vaultItems[itemId];
+    if (!item) {
+      return res.status(404).json({ error: 'Item not found' });
+    }
+
+    // Only owner can revoke access
+    if (item.ownerId !== ownerId) {
+      return res.status(401).json({ error: 'Only owner can revoke access' });
+    }
+
+    if (!users[revokeUserId]) {
+      return res.status(400).json({ error: 'User to revoke not found' });
+    }
+
+    // Check if user even has access
+    if (!wrappedDEKs[itemId] || !wrappedDEKs[itemId][revokeUserId]) {
+      return res.status(400).json({ error: 'User does not have access to revoke' });
+    }
+
+    const revokedUsername = users[revokeUserId].username || revokeUserId;
+
+    // REVOKE: Delete wrapped DEK - user can no longer decrypt
+    delete wrappedDEKs[itemId][revokeUserId];
+
+    console.log(`\n═══════════════════════════════════════`);
+    console.log(`❌ ACCESS REVOKED: ${revokeUserId}`);
+    console.log(`═══════════════════════════════════════`);
+    console.log(`   Secret: ${itemId}`);
+    console.log(`   Owner: ${ownerId}`);
+    console.log(`   Revoked User: ${revokedUsername} (${revokeUserId})`);
+    console.log(`   Action: Deleted wrappedDEK from database`);
+    console.log(`   Result: User can NO LONGER decrypt this secret`);
+    console.log(`   Timestamp: ${new Date().toISOString()}`);
+    console.log(`═══════════════════════════════════════\n`);
+
+    res.json({
+      success: true,
+      message: `Access revoked for ${revokedUsername}`,
+      itemId,
+      revokeUserId,
+      revokedUsername,
+      timestamp: new Date().toISOString(),
     });
   } catch (err) {
     console.error(err);
