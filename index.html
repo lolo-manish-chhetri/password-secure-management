@@ -1,230 +1,48 @@
-<!-- <script>
-  //   iv packed
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-
-  const IV_LENGTH = 12; // AES-GCM standard
-
-  function pack(iv, ciphertext) {
-    const packed = new Uint8Array(iv.length + ciphertext.byteLength);
-    packed.set(iv, 0);
-    packed.set(new Uint8Array(ciphertext), iv.length);
-    return packed;
-  }
-
-  function unpack(packed) {
-    return {
-      iv: packed.slice(0, IV_LENGTH),
-      ciphertext: packed.slice(IV_LENGTH),
-    };
-  }
-
-  function toBase64(bytes) {
-    let binary = "";
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-  }
-
-  function fromBase64(base64) {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-  }
-
-  async function deriveKEK(password, salt) {
-    const keyMaterial = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(password),
-      "PBKDF2",
-      false,
-      ["deriveKey"],
-    );
-
-    return crypto.subtle.deriveKey(
-      {
-        name: "PBKDF2",
-        salt,
-        iterations: 600_000,
-        hash: "SHA-256",
-      },
-      keyMaterial,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"],
-    );
-  }
-
-  async function setupKeyStore(password) {
-    console.log("generating random salt, dek, and iv...");
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const dekRaw = crypto.getRandomValues(new Uint8Array(32)); // AES-256
-    const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-    console.log("deriving KEK from password and salt...");
-    const kek = await deriveKEK(password, salt);
-    console.log("derived KEK.", kek);
-    console.log("encrypting DEK with KEK and iv...");
-    const encryptedDEK = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      kek,
-      dekRaw,
-    );
-    console.log("encrypted DEK.", encryptedDEK);
-    const packedEncryptedDEK = pack(iv, encryptedDEK);
-    console.log("packed encrypted DEK.", packedEncryptedDEK);
-    console.log("storing salt in db and encrypted DEK in Secure storage...");
-    return {
-      salt: toBase64(salt),
-      encryptedDEK: toBase64(packedEncryptedDEK),
-    };
-  }
-
-  async function recoverDEK(password, saltB64, encryptedDEKB64) {
-    const salt = fromBase64(saltB64);
-    const packed = fromBase64(encryptedDEKB64);
-
-    const { iv, ciphertext } = unpack(packed);
-    console.log("deriving KEK from password and salt...");
-    const kek = await deriveKEK(password, salt);
-    console.log("derived KEK.", kek);
-    console.log("decrypting DEK with KEK and iv...");
-    const dekRaw = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv },
-      kek,
-      ciphertext,
-    );
-    console.log("decrypted DEK.", dekRaw);
-
-    return crypto.subtle.importKey("raw", dekRaw, { name: "AES-GCM" }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
-  }
-
-  async function recoverDEK(password, saltB64, encryptedDEKB64) {
-    const salt = fromBase64(saltB64);
-    const packed = fromBase64(encryptedDEKB64);
-    console.log("get salt and packed encrypted DEK from storage...");
-
-    const { iv, ciphertext } = unpack(packed);
-    console.log("deriving KEK from password and salt...");
-    const kek = await deriveKEK(password, salt);
-    console.log("decrypting DEK with KEK and iv...");
-    const dekRaw = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv },
-      kek,
-      ciphertext,
-    );
-    console.log("decrypted DEK.", dekRaw);
-    return crypto.subtle.importKey("raw", dekRaw, { name: "AES-GCM" }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
-  }
-
-  async function encryptData(dekKey, plaintext) {
-    console.log("generating iv for data encryption...");
-    const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-    console.log("generated iv for data encryption:", iv);
-    console.log("encrypting plaintext:", plaintext);
-    const ciphertext = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      dekKey,
-      encoder.encode(plaintext),
-    );
-    console.log("encrypted ciphertext:", ciphertext);
-    return toBase64(pack(iv, ciphertext));
-  }
-
-  async function decryptData(dekKey, packedB64) {
-    const packed = fromBase64(packedB64);
-    const { iv, ciphertext } = unpack(packed);
-    console.log("decrypting data with DEK...");
-    console.log("using iv:", iv);
-    console.log("using ciphertext:", ciphertext);
-    const plaintextBuffer = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv },
-      dekKey,
-      ciphertext,
-    );
-    console.log("decrypted plaintext buffer:", plaintextBuffer);
-    console.log("decoding plaintext buffer to string...");
-    return decoder.decode(plaintextBuffer);
-  }
-
-  (async () => {
-    const password = "correct horse battery staple";
-
-    // Initial setup
-    console.log("Setting up keystore...");
-    const keyStore = await setupKeyStore(password);
-    console.log("KeyStore:", keyStore);
-    console.log("----------------------------------------------");
-
-    // Later...
-    console.log("Recovering DEK from keystore...");
-    const dek = await recoverDEK(
-      password,
-      keyStore.salt,
-      keyStore.encryptedDEK,
-    );
-    console.log("Recovered DEK:", dek);
-    console.log("----------------------------------------------");
-
-    // Encrypt data
-    console.log("Encrypting data with DEK...");
-    const storedEncryptedData = await encryptData(
-      dek,
-      `{name: "Alice", age: 30}`,
-    );
-    console.log("Stored Encrypted Data:", storedEncryptedData);
-    console.log("----------------------------------------------");
-
-    // Decrypt data
-    console.log("Decrypting data with DEK...");
-    const result = await decryptData(dek, storedEncryptedData);
-    console.log("Decrypted Result:", result);
-
-    console.log(result); // Encrypt everything!
-  })(); -->
-
-
-  <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Zero-Knowledge Vault Demo</title>
+    <title>Zero-Knowledge Vault - Field-Level Encryption</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
       body {
-        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-          sans-serif;
-        background: #0b1020;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: radial-gradient(ellipse at top, #1a2847, #0f0f23);
         color: #f5f7ff;
-        margin: 0;
-        padding: 24px;
+        line-height: 1.6;
       }
-      h1,
+      .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+      h1 {
+        font-size: 28px;
+        background: linear-gradient(135deg, #4f7dff, #8f67ff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 8px;
+      }
       h2 {
-        margin-top: 0;
+        font-size: 16px;
+        font-weight: 600;
+        color: #8fa3cc;
+        margin: 20px 0 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
       }
-      .app {
-        max-width: 1100px;
-        margin: 0 auto;
+      .subtitle { color: #8fa3cc; font-size: 14px; margin-bottom: 24px; }
+      .grid {
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 24px;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 20px;
+        margin-bottom: 20px;
       }
       .card {
         background: #171d33;
         border-radius: 12px;
-        padding: 16px 18px 18px;
+        padding: 16px 18px;
         box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
         border: 1px solid #262f4d;
       }
+      .stack { display: flex; flex-direction: column; gap: 10px; }
       label {
         font-size: 12px;
         text-transform: uppercase;
@@ -233,8 +51,7 @@
         display: block;
         margin-bottom: 4px;
       }
-      input,
-      textarea {
+      input, textarea, select {
         width: 100%;
         padding: 8px 10px;
         border-radius: 8px;
@@ -245,12 +62,8 @@
         font-size: 14px;
         box-sizing: border-box;
       }
-      textarea {
-        resize: vertical;
-        min-height: 72px;
-      }
-      input:focus,
-      textarea:focus {
+      textarea { resize: vertical; min-height: 72px; }
+      input:focus, textarea:focus, select:focus {
         outline: none;
         border-color: #4f7dff;
         box-shadow: 0 0 0 1px rgba(79, 125, 255, 0.4);
@@ -268,238 +81,174 @@
         align-items: center;
         gap: 6px;
         box-shadow: 0 10px 24px rgba(79, 125, 255, 0.5);
+        transition: transform 0.2s;
       }
-      button.secondary {
-        background: transparent;
-        box-shadow: none;
+      button:hover { transform: translateY(-2px); }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .badge {
+        display: inline-flex;
+        padding: 4px 12px;
         border-radius: 999px;
-        border: 1px solid #3a456d;
-        color: #d3d9ff;
-      }
-      button:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-        box-shadow: none;
-      }
-      .row {
-        display: flex;
-        gap: 8px;
-      }
-      .row > * {
-        flex: 1;
-      }
-      .section-title {
-        font-size: 14px;
-        font-weight: 600;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: #a1acff;
-        margin-bottom: 8px;
-      }
-      .muted {
-        color: #7e88b8;
+        background: rgba(79, 125, 255, 0.1);
+        border: 1px solid #4f7dff;
+        color: #7ba3ff;
         font-size: 12px;
-      }
-      .log {
-        font-family: "JetBrains Mono", SFMono-Regular, Menlo, Monaco, Consolas,
-          "Liberation Mono", "Courier New", monospace;
-        font-size: 11px;
-        background: #050813;
-        border-radius: 8px;
-        padding: 8px;
-        max-height: 260px;
-        overflow: auto;
-        border: 1px solid #222a46;
-        white-space: pre-wrap;
+        font-weight: 600;
       }
       .pill {
-        display: inline-flex;
-        align-items: center;
-        padding: 3px 8px;
-        border-radius: 999px;
-        background: rgba(79, 125, 255, 0.16);
-        color: #d7e0ff;
-        font-size: 11px;
-        gap: 4px;
-      }
-      .pill span.dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 999px;
-        background: #4f7dff;
-      }
-      .stack {
         display: flex;
-        flex-direction: column;
+        align-items: center;
         gap: 8px;
+        padding: 8px 12px;
+        border-radius: 8px;
+        background: rgba(79, 125, 255, 0.1);
+        border: 1px solid #4f7dff;
+        font-size: 13px;
       }
-      .stack-md {
-        gap: 10px;
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #4f7dff;
+        animation: pulse 2s infinite;
       }
-      .divider {
-        height: 1px;
-        background: linear-gradient(
-          to right,
-          transparent,
-          #262f4d,
-          transparent
-        );
-        margin: 10px 0 8px;
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+      .log {
+        background: #0f1425;
+        border: 1px solid #303a5e;
+        border-radius: 8px;
+        padding: 12px;
+        font-family: 'Monaco', 'Courier New', monospace;
+        font-size: 12px;
+        max-height: 300px;
+        overflow-y: auto;
+        color: #a8d5ff;
+        white-space: pre-wrap;
+        word-break: break-word;
       }
-      .badge {
-        padding: 2px 8px;
-        border-radius: 999px;
-        border: 1px solid #35406a;
-        font-size: 11px;
-        color: #97a2e8;
+      .modal-overlay {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0, 0, 0, 0.7);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
       }
-      .grid-two {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
+      .modal {
+        background: #1a2847;
+        border-radius: 12px;
+        padding: 24px;
+        border: 1px solid #262f4d;
+        max-width: 600px;
+        width: 90%;
+        max-height: 80vh;
+        overflow-y: auto;
       }
-      .code {
-        font-family: "JetBrains Mono", SFMono-Regular, Menlo, Monaco, Consolas,
-          "Liberation Mono", "Courier New", monospace;
-        font-size: 11px;
-        color: #cfd6ff;
+      .modal h3 { margin-bottom: 16px; color: #f5f7ff; font-size: 20px; }
+      .modal p { color: #8fa3cc; font-size: 14px; margin-bottom: 16px; }
+      .form-group { margin-bottom: 16px; }
+      .form-label {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
       }
+      .encrypted-badge { font-size: 11px; color: #ff6b6b; font-weight: bold; }
+      .modal-buttons {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 24px;
+      }
+      .error-message { color: #ff6b6b; font-size: 12px; margin-top: 8px; }
+      .btn-primary { background: linear-gradient(135deg, #4f7dff, #8f67ff); }
+      .btn-secondary { background: #6a7a99; }
+      .btn-reveal {
+        padding: 4px 8px;
+        font-size: 12px;
+        background: #2196F3;
+        border-radius: 4px;
+      }
+      .field-display {
+        padding: 12px;
+        background: #0f1425;
+        border-radius: 6px;
+        border: 1px solid #303a5e;
+        word-break: break-all;
+        font-family: monospace;
+        font-size: 13px;
+      }
+      .field-encrypted { color: #ff6b6b; font-style: italic; }
     </style>
   </head>
   <body>
-    <h1>Zero-Knowledge Vault with Sharing</h1>
-    <p class="muted">
-      Household vault items are encrypted with a DEK. Each user derives a KEK
-      from their master password and gets a wrapped copy of the DEK. Sharing =
-      wrapping the same DEK for another user — the backend never sees the
-      plaintext DEK or vault data.
-    </p>
+    <div class="container">
+      <h1>🔐 Zero-Knowledge Vault</h1>
+      <p class="subtitle">Field-level encryption with proper password verification</p>
 
-    <div class="app">
-      <div class="card">
-        <div class="section-title">1 · Users &amp; Keys</div>
-        <div class="muted" style="margin-bottom: 10px">
-          Register two demo users and derive their KEKs locally from passwords.
-        </div>
-        <div class="stack-md">
-          <div class="grid-two">
-            <div>
-              <label>User 1 Username</label>
-              <input id="u1-username" value="alice" />
-            </div>
-            <div>
-              <label>User 1 Master Password</label>
-              <input id="u1-password" type="password" value="password1" />
-            </div>
-          </div>
-          <div class="grid-two">
-            <div>
-              <label>User 2 Username</label>
-              <input id="u2-username" value="bob" />
-            </div>
-            <div>
-              <label>User 2 Master Password</label>
-              <input id="u2-password" type="password" value="password2" />
-            </div>
-          </div>
-          <div class="row" style="margin-top: 4px">
-            <button id="btn-register">Register &amp; Derive KEKs</button>
-            <button id="btn-show-state" class="secondary">
-              View In-Memory Server State
-            </button>
-          </div>
+      <div class="grid">
+        <div class="card">
+          <h2>Step 1: Register</h2>
           <div class="stack">
-            <div class="muted">
-              <span class="badge">User IDs (from backend)</span>
-            </div>
-            <div class="code">
-              U1 ID: <span id="u1-id">–</span><br />
-              U2 ID: <span id="u2-id">–</span>
-            </div>
+            <div><label>User 1</label><input id="u1-username" value="alice" /><label>Password</label><input id="u1-password" type="password" value="password1" /></div>
+            <div><label>User 2</label><input id="u2-username" value="bob" /><label>Password</label><input id="u2-password" type="password" value="password2" /></div>
+            <button id="btn-register">Register Users</button>
           </div>
+          <div style="margin-top: 12px"><span class="badge">U1: <span id="u1-id">-</span></span></div>
+          <div style="margin-top: 8px"><span class="badge">U2: <span id="u2-id">-</span></span></div>
         </div>
 
-        <div class="divider"></div>
-
-        <div class="section-title">2 · Create Vault Item (User 1)</div>
-        <div class="muted" style="margin-bottom: 8px">
-          We generate a household DEK, encrypt the item with it, then wrap the
-          DEK with User 1's KEK and send the ciphertexts to the backend.
-        </div>
-        <div class="stack-md">
-          <div>
-            <label>Household ID</label>
-            <input id="household-id" value="H1" />
-          </div>
-          <div>
-            <label>Vault Item (plaintext JSON or text)</label>
-            <textarea id="vault-plaintext">
-{"account":"Bank","number":"****4221","note":"Primary checking"}</textarea>
-          </div>
-          <button id="btn-create-item">Create Vault Item as User 1</button>
+        <div class="card">
+          <h2>Step 2: Create Secret</h2>
           <div class="stack">
-            <span class="badge">Created Item ID</span>
-            <div class="code">Item ID: <span id="item-id">–</span></div>
+            <div><label>Household ID</label><input id="household-id" value="H1" /></div>
+            <div><label>Secret Type</label><select id="schema-type"><option value="loginCredentials">Login Credentials</option><option value="bankAccount">Bank Account</option></select></div>
+            <button id="btn-create-secret">Create Secret</button>
+          </div>
+          <div style="margin-top: 12px"><span class="badge">Secret: <span id="secret-id">-</span></span></div>
+        </div>
+
+        <div class="card">
+          <h2>Step 3: View & Unlock</h2>
+          <div class="stack">
+            <button id="btn-view-secret">View Secret</button>
+            <button id="btn-show-state">Debug State</button>
           </div>
         </div>
-
-        <div class="divider"></div>
-
-        <div class="section-title">3 · Share with User 2</div>
-        <div class="muted" style="margin-bottom: 8px">
-          User 1 locally unwraps the DEK with their KEK, then re-wraps it with
-          User 2's KEK and sends only the wrapped DEK to the backend.
-        </div>
-        <button id="btn-share">Share Item with User 2</button>
-        <p class="muted" style="margin-top: 6px">
-          Backend ends up with two wrapped DEKs for the same vault item: one for
-          User 1 and one for User 2.
-        </p>
       </div>
 
       <div class="card">
-        <div class="section-title">
-          4 · User 2 Accesses Shared Vault Item
-        </div>
-        <p class="muted">
-          User 2 fetches <strong>only</strong> ciphertexts from the backend:
-          <code>encryptedData</code> and their <code>wrappedDEK</code>. They
-          derive KEK2 from their password, unwrap the DEK, then decrypt the
-          vault item.
-        </p>
-        <div class="stack-md" style="margin-top: 8px">
-          <button id="btn-access">Access Item as User 2</button>
-          <div class="stack">
-            <span class="badge">Decrypted Vault Item (User 2)</span>
-            <pre id="u2-decrypted" class="log"></pre>
-          </div>
-          <div class="divider"></div>
-          <div class="stack">
-            <div class="row" style="align-items: center">
-              <div class="pill">
-                <span class="dot"></span>
-                <span>Client-Side Crypto Trace</span>
-              </div>
-              <span class="muted" style="text-align: right; flex: 1">
-                DEK is <strong>never</strong> sent to the backend.
-              </span>
-            </div>
-            <pre id="log" class="log"></pre>
-          </div>
-        </div>
+        <h2>Crypto Trace Log</h2>
+        <div style="margin-top: 8px"><div class="pill"><span class="dot"></span><span>Proper password verification via DEK unwrapping</span></div></div>
+        <pre id="log" class="log"></pre>
       </div>
     </div>
 
     <script>
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
-      const IV_LENGTH = 12; // AES-GCM standard
+      const IV_LENGTH = 12;
+      const ITERATIONS = 600000;
 
-      const logEl = document.getElementById("log");
-      function log(message) {
-        const ts = new Date().toISOString().split("T")[1].replace("Z", "");
-        logEl.textContent += `[${ts}] ${message}\n`;
+      const logEl = document.getElementById('log');
+      function log(msg) {
+        const ts = new Date().toISOString().split('T')[1].replace('Z', '');
+        logEl.textContent += `[${ts}] ${msg}\n`;
         logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function toBase64(bytes) {
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary);
+      }
+
+      function fromBase64(base64) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
       }
 
       function pack(iv, ciphertext) {
@@ -510,321 +259,670 @@
       }
 
       function unpack(packed) {
-        return {
-          iv: packed.slice(0, IV_LENGTH),
-          ciphertext: packed.slice(IV_LENGTH),
-        };
-      }
-
-      function toBase64(bytes) {
-        let binary = "";
-        for (let i = 0; i < bytes.length; i++) {
-          binary += String.fromCharCode(bytes[i]);
-        }
-        return btoa(binary);
-      }
-
-      function fromBase64(base64) {
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-        return bytes;
+        return { iv: packed.slice(0, IV_LENGTH), ciphertext: packed.slice(IV_LENGTH) };
       }
 
       async function deriveKEK(password, saltBytes) {
-        const keyMaterial = await crypto.subtle.importKey(
-          "raw",
-          encoder.encode(password),
-          "PBKDF2",
-          false,
-          ["deriveKey"],
-        );
+        const keyMaterial = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveKey']);
         return crypto.subtle.deriveKey(
-          {
-            name: "PBKDF2",
-            salt: saltBytes,
-            iterations: 250000,
-            hash: "SHA-256",
-          },
+          { name: 'PBKDF2', salt: saltBytes, iterations: ITERATIONS, hash: 'SHA-256' },
           keyMaterial,
-          { name: "AES-GCM", length: 256 },
+          { name: 'AES-GCM', length: 256 },
           false,
-          ["encrypt", "decrypt"],
+          ['encrypt', 'decrypt']
         );
       }
 
-      async function generateHouseholdDEK() {
-        const dekRaw = crypto.getRandomValues(new Uint8Array(32));
-        return dekRaw;
+      function generateDEK() {
+        return crypto.getRandomValues(new Uint8Array(32));
       }
 
-      async function wrapDEKWithKEK(dekRawBytes, kek) {
+      async function importDEK(dekRaw) {
+        return crypto.subtle.importKey('raw', dekRaw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+      }
+
+      async function wrapDEKWithKEK(dekRaw, kek) {
         const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-        const ciphertext = await crypto.subtle.encrypt(
-          { name: "AES-GCM", iv },
-          kek,
-          dekRawBytes,
-        );
-        return toBase64(pack(iv, ciphertext));
+        const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, kek, dekRaw);
+        return toBase64(pack(iv, ct));
       }
 
       async function unwrapDEKWithKEK(wrappedDEKB64, kek) {
         const packed = fromBase64(wrappedDEKB64);
         const { iv, ciphertext } = unpack(packed);
-        const dekRaw = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv },
-          kek,
-          ciphertext,
-        );
+        const dekRaw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, kek, ciphertext);
         return new Uint8Array(dekRaw);
       }
 
-      async function importDEKForData(dekRawBytes) {
-        return crypto.subtle.importKey(
-          "raw",
-          dekRawBytes,
-          { name: "AES-GCM" },
-          false,
-          ["encrypt", "decrypt"],
-        );
-      }
-
-      async function encryptWithDEK(dekKey, plaintext) {
+      async function encryptField(fieldValue, dekKey) {
         const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-        const ct = await crypto.subtle.encrypt(
-          { name: "AES-GCM", iv },
-          dekKey,
-          encoder.encode(plaintext),
-        );
+        const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, dekKey, encoder.encode(String(fieldValue)));
         return toBase64(pack(iv, ct));
       }
 
-      async function decryptWithDEK(dekKey, packedB64) {
-        const packed = fromBase64(packedB64);
+      async function decryptField(encryptedFieldB64, dekKey) {
+        const packed = fromBase64(encryptedFieldB64);
         const { iv, ciphertext } = unpack(packed);
-        const ptBuf = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv },
-          dekKey,
-          ciphertext,
-        );
+        const ptBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, dekKey, ciphertext);
         return decoder.decode(ptBuf);
       }
 
-      // Demo state (kept only in the browser)
-      const state = {
-        user1: {
-          id: null,
-          salt: null,
-          kek: null,
-        },
-        user2: {
-          id: null,
-          salt: null,
-          kek: null,
-        },
-        householdDEKRaw: null, // Uint8Array
-        itemId: null,
-        wrappedDEKForUser1: null,
-      };
-
-      // --- Wire up UI ---
-      const u1UsernameInput = document.getElementById("u1-username");
-      const u1PasswordInput = document.getElementById("u1-password");
-      const u2UsernameInput = document.getElementById("u2-username");
-      const u2PasswordInput = document.getElementById("u2-password");
-      const u1IdSpan = document.getElementById("u1-id");
-      const u2IdSpan = document.getElementById("u2-id");
-      const btnRegister = document.getElementById("btn-register");
-      const btnShowState = document.getElementById("btn-show-state");
-      const householdInput = document.getElementById("household-id");
-      const vaultPlaintextInput = document.getElementById("vault-plaintext");
-      const btnCreateItem = document.getElementById("btn-create-item");
-      const itemIdSpan = document.getElementById("item-id");
-      const btnShare = document.getElementById("btn-share");
-      const btnAccess = document.getElementById("btn-access");
-      const u2DecryptedOutput = document.getElementById("u2-decrypted");
-
-      async function postJSON(url, body) {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`${res.status} ${res.statusText}: ${text}`);
-        }
-        return res.json();
+      async function encryptPayload(plaintext, dekKey) {
+        const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+        const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, dekKey, encoder.encode(plaintext));
+        return toBase64(pack(iv, ct));
       }
 
-      btnRegister.addEventListener("click", async () => {
-        logEl.textContent = "";
-        u2DecryptedOutput.textContent = "";
+      async function decryptPayload(encryptedB64, dekKey) {
+        const packed = fromBase64(encryptedB64);
+        const { iv, ciphertext } = unpack(packed);
+        const ptBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, dekKey, ciphertext);
+        return decoder.decode(ptBuf);
+      }
+
+      const state = {
+        user1: { id: null, salt: null, kek: null, wrappedPrivateKey: null, publicKeyJwk: null, privateKeyJwk: null },
+        user2: { id: null, salt: null, kek: null, wrappedPrivateKey: null, publicKeyJwk: null, privateKeyJwk: null },
+        secretId: null,
+        secretSchema: null,
+        secretData: null,
+        wrappedDEK: null,
+        currentDEKKey: null,
+        currentRevealingField: null,
+      };
+
+      const u1UsernameInput = document.getElementById('u1-username');
+      const u1PasswordInput = document.getElementById('u1-password');
+      const u2UsernameInput = document.getElementById('u2-username');
+      const u2PasswordInput = document.getElementById('u2-password');
+      const u1IdSpan = document.getElementById('u1-id');
+      const u2IdSpan = document.getElementById('u2-id');
+      const householdInput = document.getElementById('household-id');
+      const schemaTypeSelect = document.getElementById('schema-type');
+      const secretIdSpan = document.getElementById('secret-id');
+      const btnRegister = document.getElementById('btn-register');
+      const btnCreateSecret = document.getElementById('btn-create-secret');
+      const btnViewSecret = document.getElementById('btn-view-secret');
+      const btnShowState = document.getElementById('btn-show-state');
+
+      // FLOW 1: User Onboarding - Master Password Setup
+      btnRegister.addEventListener('click', async () => {
         try {
-          // User 1
-          const u1Salt = crypto.getRandomValues(new Uint8Array(16));
-          log("User1: deriving KEK1 from master password with PBKDF2...");
-          const kek1 = await deriveKEK(u1PasswordInput.value, u1Salt);
-          log("User1: KEK1 derived.");
-          const reg1 = await postJSON("/register", {
-            username: u1UsernameInput.value,
-            salt: toBase64(u1Salt),
+          log('\n═══════════════════════════════════════════════════════');
+          log('🔐 FLOW 1: USER ONBOARDING (Master Password Setup)');
+          log('═══════════════════════════════════════════════════════\n');
+
+          // ──────────────────────────────────────────────────────────
+          // STEP 1: User enters master password
+          // ──────────────────────────────────────────────────────────
+          const masterPassword1 = u1PasswordInput.value;
+          if (!masterPassword1) {
+            log('❌ Error: User 1 master password is required');
+            return;
+          }
+          log(`📝 STEP 1: User 1 (Alice) - Master password entered`);
+          log(`   Password length: ${masterPassword1.length} characters\n`);
+
+          // ──────────────────────────────────────────────────────────
+          // STEP 2: Generate random salt
+          // ──────────────────────────────────────────────────────────
+          const salt1 = crypto.getRandomValues(new Uint8Array(16));
+          log(`🧂 STEP 2: Generated random salt (16 bytes)`);
+          log(`   Salt (base64): ${toBase64(salt1).substring(0, 30)}...\n`);
+
+          // ──────────────────────────────────────────────────────────
+          // STEP 3: Derive KEK via PBKDF2
+          // ──────────────────────────────────────────────────────────
+          log(`🔑 STEP 3: Derive KEK via PBKDF2(password + salt, 250k iterations)`);
+          const kek1 = await deriveKEK(masterPassword1, salt1);
+          log(`   KEK derived successfully (stored in session memory)\n`);
+
+          // ──────────────────────────────────────────────────────────
+          // STEP 4: Generate ECDH keypair
+          // ──────────────────────────────────────────────────────────
+          log(`🔐 STEP 4: Generate ECDH keypair (P-256 curve)`);
+          const keypair1 = await crypto.subtle.generateKey(
+            { name: 'ECDH', namedCurve: 'P-256' },
+            true, // extractable for JWK export
+            ['deriveKey']
+          );
+          log(`   Private Key: Generated (not in transit)`);
+          log(`   Public Key: Generated\n`);
+
+          const publicKeyJwk1 = await crypto.subtle.exportKey('jwk', keypair1.publicKey);
+          const privateKeyJwk1 = await crypto.subtle.exportKey('jwk', keypair1.privateKey);
+          log(`✅ Keys exported to JWK format\n`);
+
+          // ──────────────────────────────────────────────────────────
+          // STEP 5: Wrap private key with KEK
+          // ──────────────────────────────────────────────────────────
+          log(`🔒 STEP 5: Wrap private key with KEK`);
+          const privateKeyJSON1 = JSON.stringify(privateKeyJwk1);
+          const wrappedPrivateKey1 = await encryptPayload(privateKeyJSON1, kek1);
+          log(`   Private Key JWK encrypted with AES-256-GCM`);
+          log(`   Wrapped Private Key (base64): ${wrappedPrivateKey1.substring(0, 30)}...\n`);
+
+          // ──────────────────────────────────────────────────────────
+          // STEP 6: Send to backend
+          // ──────────────────────────────────────────────────────────
+          log(`📤 STEP 6: Send to backend`);
+          log(`   Sending: salt, publicKey, wrappedPrivateKey`);
+          log(`   NOT sending: masterPassword (never goes to backend)\n`);
+
+          const res1 = await fetch('/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              username: u1UsernameInput.value,
+              salt: toBase64(salt1),
+              publicKey: publicKeyJwk1,
+              wrappedPrivateKey: wrappedPrivateKey1,
+            }),
           });
 
-          state.user1.id = reg1.userId;
-          state.user1.salt = u1Salt;
+          if (!res1.ok) {
+            const errData = await res1.json();
+            throw new Error(errData.error);
+          }
+
+          const data1 = await res1.json();
+          log(`✅ Backend: User registered with ID: ${data1.userId}\n`);
+
+          // ──────────────────────────────────────────────────────────
+          // STEP 7: Store in frontend state
+          // ──────────────────────────────────────────────────────────
+          state.user1.id = data1.userId;
+          state.user1.salt = salt1;
           state.user1.kek = kek1;
-          u1IdSpan.textContent = reg1.userId;
+          state.user1.publicKeyJwk = publicKeyJwk1;
+          state.user1.privateKeyJwk = privateKeyJwk1;
+          state.user1.wrappedPrivateKey = wrappedPrivateKey1;
 
-          // User 2
-          const u2Salt = crypto.getRandomValues(new Uint8Array(16));
-          log("User2: deriving KEK2 from master password with PBKDF2...");
-          const kek2 = await deriveKEK(u2PasswordInput.value, u2Salt);
-          log("User2: KEK2 derived.");
-          const reg2 = await postJSON("/register", {
-            username: u2UsernameInput.value,
-            salt: toBase64(u2Salt),
+          u1IdSpan.textContent = data1.userId;
+          u1PasswordInput.disabled = true;
+          u1UsernameInput.disabled = true;
+
+          log(`💾 Frontend: Stored in session memory`);
+          log(`   userId: ${data1.userId}`);
+          log(`   salt: ${toBase64(salt1).substring(0, 20)}...`);
+          log(`   kek: [in memory, not displayed]`);
+          log(`   publicKeyJwk: stored`);
+          log(`   privateKeyJwk: stored (in memory)`);
+          log(`   wrappedPrivateKey: stored\n`);
+
+          log(`⏰ KEK will remain in memory for this session`);
+          log(`   On logout/timeout: KEK + privateKey cleared\n`);
+
+          log('═══════════════════════════════════════════════════════');
+          log('✅ FLOW 1 COMPLETE: User 1 Onboarding successful');
+          log('═══════════════════════════════════════════════════════\n');
+
+          // ──────────────────────────────────────────────────────────
+          // Register User 2 (Bob) - Same Flow
+          // ──────────────────────────────────────────────────────────
+          const masterPassword2 = u2PasswordInput.value;
+          if (!masterPassword2) {
+            log('❌ Error: User 2 master password is required');
+            return;
+          }
+
+          log('📝 STEP 1: User 2 (Bob) - Master password entered');
+          const salt2 = crypto.getRandomValues(new Uint8Array(16));
+          log('🧂 STEP 2: Generated random salt (16 bytes)');
+
+          const kek2 = await deriveKEK(masterPassword2, salt2);
+          log('🔑 STEP 3: KEK derived via PBKDF2');
+
+          const keypair2 = await crypto.subtle.generateKey(
+            { name: 'ECDH', namedCurve: 'P-256' },
+            true,
+            ['deriveKey']
+          );
+          const publicKeyJwk2 = await crypto.subtle.exportKey('jwk', keypair2.publicKey);
+          const privateKeyJwk2 = await crypto.subtle.exportKey('jwk', keypair2.privateKey);
+          log('🔐 STEP 4: ECDH keypair generated');
+
+          const privateKeyJSON2 = JSON.stringify(privateKeyJwk2);
+          const wrappedPrivateKey2 = await encryptPayload(privateKeyJSON2, kek2);
+          log('🔒 STEP 5: Private key wrapped with KEK');
+
+          const res2 = await fetch('/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              username: u2UsernameInput.value,
+              salt: toBase64(salt2),
+              publicKey: publicKeyJwk2,
+              wrappedPrivateKey: wrappedPrivateKey2,
+            }),
           });
 
-          state.user2.id = reg2.userId;
-          state.user2.salt = u2Salt;
+          if (!res2.ok) {
+            const errData = await res2.json();
+            throw new Error(errData.error);
+          }
+
+          const data2 = await res2.json();
+          state.user2.id = data2.userId;
+          state.user2.salt = salt2;
           state.user2.kek = kek2;
-          u2IdSpan.textContent = reg2.userId;
+          state.user2.publicKeyJwk = publicKeyJwk2;
+          state.user2.privateKeyJwk = privateKeyJwk2;
+          state.user2.wrappedPrivateKey = wrappedPrivateKey2;
 
-          log(
-            `Registered users with backend: U1=${reg1.userId}, U2=${reg2.userId}`,
-          );
-          log("Salts are stored at backend; KEKs stay only in this browser.");
+          u2IdSpan.textContent = data2.userId;
+          u2PasswordInput.disabled = true;
+          u2UsernameInput.disabled = true;
+
+          log(`✅ User 2 (Bob) registered: ${data2.userId}`);
+          log('═══════════════════════════════════════════════════════\n');
+
         } catch (err) {
+          log('❌ Error: ' + err.message);
           console.error(err);
-          log("Error during registration / KEK derivation: " + err.message);
         }
       });
 
-      btnCreateItem.addEventListener("click", async () => {
+      btnCreateSecret.addEventListener('click', async () => {
         try {
-          if (!state.user1.id || !state.user1.kek) {
-            alert("Register users first.");
-            return;
+          if (!state.user1.id) { alert('Register first'); return; }
+          log('📋 Creating secret...');
+          const schemaType = schemaTypeSelect.value;
+          const schemaRes = await fetch(`/schemas/${schemaType}`);
+          const schema = await schemaRes.json();
+          state.secretSchema = schema;
+          log(`✅ Fetched schema: ${schemaType}`);
+          openCreateSecretModal(schema, schemaType);
+        } catch (err) {
+          log('❌Error: ' + err.message);
+        }
+      });
+
+      function openCreateSecretModal(schema, schemaType) {
+        const modal = document.createElement('div');
+        modal.className = 'modal-overlay';
+        let formHTML = '<form style="display: flex; flex-direction: column; gap: 12px;">';
+        const sortedFields = Object.entries(schema.properties).sort((a, b) => (a[1]['x-ui-order'] || 0) - (b[1]['x-ui-order'] || 0));
+        for (const [fieldName, fieldDef] of sortedFields) {
+          const isEnc = fieldDef['x-ui-encrypted'];
+          const badge = isEnc ? '<span class="encrypted-badge">🔒 encrypted</span>' : '';
+          const id = `field-${fieldName}`;
+          formHTML += `<div class="form-group"><div class="form-label"><label for="${id}">${fieldDef.label}</label>${badge}</div>`;
+          if (fieldDef['x-ui-type'] === 'select' && fieldDef.enum) {
+            formHTML += `<select id="${id}"><option>--Select--</option>${fieldDef.enum.map(o => `<option value="${o}">${o}</option>`).join('')}</select>`;
+          } else if (fieldDef['x-ui-type'] === 'textarea') {
+            formHTML += `<textarea id="${id}"></textarea>`;
+          } else {
+            formHTML += `<input type="text" id="${id}" />`;
           }
-          const householdId = householdInput.value || "H1";
-          log("Generating random DEK_H1 for household vault...");
-          const dekRaw = await generateHouseholdDEK();
-          state.householdDEKRaw = dekRaw;
+          formHTML += '</div>';
+        }
+        formHTML += '</form>';
+        modal.innerHTML = `<div class="modal"><h3>📝 Create: ${schemaType}</h3>${formHTML}<div class="modal-buttons"><button class="btn-secondary" onclick="this.closest('.modal-overlay').remove();">Cancel</button><button class="btn-primary" onclick="saveSecret('${schemaType}');">Save</button></div></div>`;
+        document.body.appendChild(modal);
 
-          const dekKey = await importDEKForData(dekRaw);
-          log("Encrypting vault item with DEK_H1 (AES-256-GCM)...");
-          const encryptedData = await encryptWithDEK(
-            dekKey,
-            vaultPlaintextInput.value,
-          );
+        // Populate with dummy data
+        const dummyData = {
+          loginCredentials: {
+            ProviderName: 'Gmail',
+            Website: 'https://mail.google.com',
+            Username: 'alice@gmail.com',
+            Password: 'SecurePass123!@#',
+            '2FAMethod': 'Authenticator App',
+            '2FADetails': 'JBSWY3DPEBLW64TMMQ======',
+            Notes: 'Primary email account',
+          },
+          bankAccount: {
+            AccountName: 'Savings Account',
+            BankName: 'First Bank',
+            AccountNumber: '9876543210',
+            RoutingNumber: '021000021',
+            PIN: '1234',
+            Notes: 'Main savings',
+          },
+        };
 
-          log("Wrapping DEK_H1 with KEK1 for User 1...");
-          const wrappedDEKUser1 = await wrapDEKWithKEK(
-            dekRaw,
-            state.user1.kek,
-          );
-          state.wrappedDEKForUser1 = wrappedDEKUser1;
+        const data = dummyData[schemaType] || {};
+        for (const [fieldName, value] of Object.entries(data)) {
+          const el = document.getElementById(`field-${fieldName}`);
+          if (el) {
+            el.value = value;
+          }
+        }
+      }
 
-          const res = await postJSON("/vault/create", {
-            householdId,
-            ownerId: state.user1.id,
-            encryptedData,
-            wrappedDEK: wrappedDEKUser1,
+      async function saveSecret(schemaType) {
+        try {
+          const householdId = householdInput.value;
+          const schema = state.secretSchema;
+          
+          // Step 1: Collect form data
+          const secretData = {};
+          for (const fieldName of Object.keys(schema.properties)) {
+            const el = document.getElementById(`field-${fieldName}`);
+            if (el) secretData[fieldName] = el.value;
+          }
+          log(`📋 Collected form data from user`);
+          document.querySelector('.modal-overlay').remove();
+
+          // Step 2: Generate DEK (one per secret)
+          const dekRaw = generateDEK();
+          const dekKey = await importDEK(dekRaw);
+          log('✅ Generated DEK for this secret');
+
+          // Step 3: Encrypt only sensitive fields (those marked x-ui-encrypted)
+          log(`🔒 Encrypting sensitive fields...`);
+          const encryptedFields = [];
+          
+          for (const [fieldName, fieldDef] of Object.entries(schema.properties)) {
+            if (fieldDef['x-ui-encrypted']) {
+              const plainValue = secretData[fieldName];
+              const encryptedValue = await encryptField(plainValue, dekKey);
+              secretData[fieldName] = encryptedValue; // Replace with base64 ciphertext
+              encryptedFields.push(fieldName);
+              log(`   🔐 Encrypted: ${fieldName}`);
+            } else {
+              log(`   ✓ Plaintext: ${fieldName}`);
+            }
+          }
+
+          log(`\n📊 Final secret structure:`);
+          for (const [fieldName, value] of Object.entries(secretData)) {
+            const isEncrypted = encryptedFields.includes(fieldName);
+            const preview = isEncrypted ? value.substring(0, 20) + '...' : value;
+            log(`   ${fieldName}: ${isEncrypted ? '[ENCRYPTED]' : '[PLAINTEXT]'} ${preview}`);
+          }
+
+          // Step 4: Wrap DEK with KEK
+          const wrappedDEK = await wrapDEKWithKEK(dekRaw, state.user1.kek);
+          log('\n🔑 Wrapped DEK with KEK');
+
+          // Step 5: Send to backend
+          log(`\n📤 Sending to backend for schema validation...`);
+          const createRes = await fetch('/vault/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              householdId,
+              ownerId: state.user1.id,
+              secretData, // Mix of plaintext + encrypted fields
+              wrappedDEK,
+              schemaType,
+            }),
           });
 
-          state.itemId = res.itemId;
-          itemIdSpan.textContent = res.itemId;
-          log(
-            `Created vault item ${res.itemId} on backend with encryptedData + wrapped DEK for User1.`,
-          );
+          if (!createRes.ok) {
+            const errData = await createRes.json();
+            throw new Error(errData.error || 'Create failed');
+          }
+
+          const createData = await createRes.json();
+          state.secretId = createData.itemId;
+          secretIdSpan.textContent = createData.itemId;
+          log(`✅ Secret created: ${createData.itemId}`);
+          log(`✅ Backend validated plaintext fields against schema`);
+          log(`✅ DEK wrapped and stored\n`);
+          
+          // Store secret data for viewing (but NOT the DEK key - fetch on-demand)
+          state.secretData = secretData;
+
         } catch (err) {
+          log('❌ Error: ' + err.message);
           console.error(err);
-          log("Error creating vault item: " + err.message);
+        }
+      }
+
+      btnViewSecret.addEventListener('click', async () => {
+        try {
+          if (!state.secretId) { alert('Create secret first'); return; }
+          log('👁️ Viewing secret...\n');
+
+          // Fetch from backend
+          const accessRes = await fetch('/vault/access', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ itemId: state.secretId, userId: state.user1.id }),
+          });
+          
+          if (!accessRes.ok) {
+            const err = await accessRes.json();
+            throw new Error(err.error);
+          }
+
+          const accessData = await accessRes.json();
+          log('📥 Received secret data (wrappedDEK fetched on-demand)');
+
+          // Store for field revelation later
+          // NOTE: wrappedDEK is NOT fetched here - will be fetched on-demand from /vault/get-wrapped-dek after password verification
+          state.secretData = accessData.secretData;
+          state.secretSchema = accessData.schema;
+
+          log(`📊 Secret structure (as stored):`);
+          for (const [fieldName, value] of Object.entries(accessData.secretData)) {
+            const schema = accessData.schema;
+            const isEncrypted = schema.properties[fieldName]['x-ui-encrypted'];
+            const preview = isEncrypted ? value.substring(0, 20) + '...' : value;
+            log(`   ${fieldName}: ${isEncrypted ? '[ENCRYPTED]' : '[PLAINTEXT]'} ${preview}`);
+          }
+
+          log(`\n✅ Secret retrieved and ready to view\n`);
+          renderSecretViewModal(accessData.schema, accessData.secretData);
+
+        } catch (err) {
+          log('❌ Error: ' + err.message);
+          console.error(err);
         }
       });
 
-      btnShare.addEventListener("click", async () => {
+      function renderSecretViewModal(schema, secretData) {
+        const modal = document.createElement('div');
+        modal.className = 'modal-overlay';
+        modal.id = 'view-secret-modal';
+
+        let formHTML = '<div style="display: flex; flex-direction: column; gap: 15px;">';
+        
+        const sortedFields = Object.entries(schema.properties)
+          .sort((a, b) => (a[1]['x-ui-order'] || 0) - (b[1]['x-ui-order'] || 0));
+
+        for (const [fieldName, fieldDef] of sortedFields) {
+          const isEncrypted = fieldDef['x-ui-encrypted'];
+          const value = secretData[fieldName];
+          const label = fieldDef.label || fieldName;
+
+          if (isEncrypted) {
+            formHTML += `
+              <div style="border: 1px solid #303a5e; padding: 10px; border-radius: 4px; background: rgba(79, 125, 255, 0.05);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <label style="font-weight: bold; color: #ff6b6b;">🔒 ${label}</label>
+                  <button class="btn-reveal-field" data-field="${fieldName}" 
+                    style="padding: 5px 10px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                    👁️ Reveal
+                  </button>
+                </div>
+                <div id="field-${fieldName}" style="margin-top: 10px; padding: 10px; background: #0f1425; border-radius: 4px; font-family: monospace; font-size: 12px; color: #ff6b6b; border: 1px solid #303a5e;">
+                  [Encrypted - Click to reveal]
+                </div>
+              </div>
+            `;
+          } else {
+            formHTML += `
+              <div style="border: 1px solid #303a5e; padding: 10px; border-radius: 4px;">
+                <label style="display: block; font-weight: bold; margin-bottom: 5px; color: #a8d5ff;">${label}</label>
+                <div id="field-${fieldName}" style="padding: 10px; background: #0f1425; border-radius: 4px; word-break: break-all; font-size: 13px;">
+                  ${value || '(empty)'}
+                </div>
+              </div>
+            `;
+          }
+        }
+
+        formHTML += '</div>';
+
+        modal.innerHTML = `
+          <div class="modal">
+            <h3>👁️ View Secret</h3>
+            ${formHTML}
+            <div class="modal-buttons">
+              <button class="btn-secondary" onclick="document.getElementById('view-secret-modal').remove();">Close</button>
+            </div>
+          </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        // Attach reveal handlers
+        document.querySelectorAll('.btn-reveal-field').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const fieldName = e.target.getAttribute('data-field');
+            openMasterPasswordModal(fieldName);
+          });
+        });
+      }
+
+      function openMasterPasswordModal(fieldName) {
+        const modal = document.createElement('div');
+        modal.id = 'master-password-modal';
+        modal.style.cssText = `
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          background: rgba(0,0,0,0.7);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 2000;
+        `;
+
+        const fieldLabel = state.secretSchema.properties[fieldName].label || fieldName;
+
+        modal.innerHTML = `
+          <div style="
+            background: #1a2847;
+            padding: 30px;
+            border-radius: 8px;
+            width: 400px;
+            border: 1px solid #262f4d;
+          ">
+            <h3 style="color: #f5f7ff; margin-bottom: 16px;">🔓 Unlock Field</h3>
+            <p style="color: #8fa3cc; margin-bottom: 20px;">Required to view: <strong>${fieldLabel}</strong></p>
+            <input type="password" id="modal-password" placeholder="Master password" 
+              style="width: 100%; padding: 10px; border: 1px solid #303a5e; border-radius: 4px; box-sizing: border-box; margin-bottom: 10px; background: #0f1425; color: #f5f7ff;" 
+              autofocus />
+            <div id="modal-error" style="color: #ff6b6b; margin-bottom: 10px; font-size: 12px;"></div>
+            <div style="display: flex; gap: 10px;">
+              <button id="btn-verify-password" 
+                style="flex: 1; padding: 10px; background: linear-gradient(135deg, #4f7dff, #8f67ff); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;">
+                Verify
+              </button>
+              <button id="btn-cancel-password" 
+                style="flex: 1; padding: 10px; background: #6a7a99; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;">
+                Cancel
+              </button>
+            </div>
+          </div>
+        `;
+
+        document.body.appendChild(modal);
+        state.currentRevealingField = fieldName;
+
+        document.getElementById('btn-verify-password').addEventListener('click', async () => {
+          await verifyAndDecryptField();
+        });
+
+        document.getElementById('btn-cancel-password').addEventListener('click', () => {
+          modal.remove();
+        });
+
+        document.getElementById('modal-password').focus();
+      }
+
+      async function verifyAndDecryptField() {
+        const masterPassword = document.getElementById('modal-password').value;
+        const errorEl = document.getElementById('modal-error');
+        const fieldName = state.currentRevealingField;
+
+        if (!masterPassword) {
+          errorEl.textContent = 'Enter your master password';
+          return;
+        }
+
         try {
-          if (!state.itemId) {
-            alert("Create a vault item first.");
-            return;
-          }
-          if (!state.user2.id || !state.user2.kek) {
-            alert("Register users first.");
-            return;
-          }
-          log(
-            "User1: locally unwrapping DEK_H1 with KEK1 (owner's master password)...",
-          );
-          const dekRaw = await unwrapDEKWithKEK(
-            state.wrappedDEKForUser1,
-            state.user1.kek,
-          );
+          log(`\n🔑 Password verification for field: ${fieldName}`);
+          
+          // Step 1: Derive KEK from entered password + salt
+          const derivedKEK = await deriveKEK(masterPassword, state.user1.salt);
+          log(`✅ Step 1: KEK derived from password via PBKDF2`);
 
-          log("User1: re-wrapping DEK_H1 with KEK2 for User2...");
-          const wrappedForUser2 = await wrapDEKWithKEK(
-            dekRaw,
-            state.user2.kek,
-          );
+          // Step 2: CRITICAL - Verify password by unwrapping wrappedPrivateKey
+          // wrappedPrivateKey is proof of password ownership
+          // If password WRONG: derived KEK ≠ original KEK → AES-GCM decryption FAILS
+          // If password CORRECT: derived KEK = original KEK → AES-GCM decryption SUCCEEDS
+          log(`🔓 Step 2: Verifying password by unwrapping wrappedPrivateKey...`);
+          let verifiedPrivateKey;
+          try {
+            verifiedPrivateKey = await decryptPayload(state.user1.wrappedPrivateKey, derivedKEK);
+            log(`✅ Password VERIFIED - wrappedPrivateKey unwrapped successfully!`);
+          } catch (unwrapErr) {
+            throw new Error(`Invalid master password - verification failed`);
+          }
 
-          await postJSON("/vault/share", {
-            itemId: state.itemId,
-            recipientId: state.user2.id,
-            wrappedDEKForRecipient: wrappedForUser2,
+          // Step 3: Password verified! Now fetch wrappedDEK from backend
+          log(`📤 Step 3: Fetching wrappedDEK from backend (on-demand)...`);
+          const dekResponse = await fetch('/vault/get-wrapped-dek', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              itemId: state.secretId,
+              userId: state.user1.id,
+            }),
           });
 
-          log(
-            `Shared item ${state.itemId} with User2. Backend now stores an additional wrapped DEK for U2.`,
-          );
+          if (!dekResponse.ok) {
+            const errData = await dekResponse.json();
+            throw new Error(errData.error || 'Failed to fetch wrapped DEK');
+          }
+
+          const dekData = await dekResponse.json();
+          log(`✅ Received wrappedDEK from backend`);
+
+          // Step 4: Unwrap DEK with verified KEK
+          log(`🔓 Step 4: Unwrapping DEK with verified KEK...`);
+          const dekRaw = await unwrapDEKWithKEK(dekData.wrappedDEK, derivedKEK);
+          const dekKey = await importDEK(dekRaw);
+          log(`✅ DEK unwrapped successfully`);
+          // NOTE: DEK is NOT stored in state - only used locally for decryption
+
+          // Step 5: Decrypt the field
+          const encryptedValue = state.secretData[fieldName];
+          log(`🔐 Step 5: Decrypting field...`);
+          const decryptedValue = await decryptField(encryptedValue, dekKey);
+          log(`✅ Field decrypted: ${fieldName}`);
+
+          // Display decrypted value
+          document.getElementById(`field-${fieldName}`).textContent = decryptedValue;
+          document.getElementById(`field-${fieldName}`).style.color = '#a8d5ff';
+          document.getElementById(`field-${fieldName}`).style.fontStyle = 'normal';
+
+          log(`✅ Field revealed successfully (password verified, DEK not stored)\n`);
+
+          document.getElementById('master-password-modal').remove();
+
         } catch (err) {
           console.error(err);
-          log("Error sharing item: " + err.message);
+          errorEl.textContent = '❌ ' + err.message;
+          log(`❌ Field reveal FAILED: ${err.message}\n`);
         }
-      });
+      }
 
-      btnAccess.addEventListener("click", async () => {
+      btnShowState.addEventListener('click', async () => {
         try {
-          if (!state.itemId) {
-            alert("Create and share a vault item first.");
-            return;
-          }
-          if (!state.user2.id || !state.user2.kek) {
-            alert("Register users first.");
-            return;
-          }
-          log("User2: requesting /vault/access for shared item...");
-          const res = await postJSON("/vault/access", {
-            itemId: state.itemId,
-            userId: state.user2.id,
-          });
-
-          const { encryptedData, wrappedDEK } = res;
-          log("User2: received encryptedData + wrappedDEK from backend.");
-          log("User2: unwrapping DEK_H1 with KEK2 (derived from password)...");
-          const dekRaw = await unwrapDEKWithKEK(wrappedDEK, state.user2.kek);
-          const dekKey = await importDEKForData(dekRaw);
-
-          log("User2: decrypting vaultDataEncrypted with DEK_H1...");
-          const plaintext = await decryptWithDEK(dekKey, encryptedData);
-          u2DecryptedOutput.textContent = plaintext;
-          log("User2: successfully recovered plaintext vault item.");
-        } catch (err) {
-          console.error(err);
-          log("Error accessing item as User2: " + err.message);
-        }
-      });
-
-      btnShowState.addEventListener("click", async () => {
-        try {
-          const res = await fetch("/debug/state");
+          const res = await fetch('/debug/state');
           const json = await res.json();
-          log("Server in-memory state:\n" + JSON.stringify(json, null, 2));
+          log('📊 Server state:\n' + JSON.stringify(json, null, 2));
         } catch (err) {
-          console.error(err);
-          log("Error fetching debug state: " + err.message);
+          log('❌ Error: ' + err.message);
         }
       });
     </script>
