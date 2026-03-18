@@ -297,6 +297,17 @@ app.get('/schemas', (req, res) => {
   res.json(schemaList);
 });
 
+// Get public key for a user (used by frontend policy-check step in Flow 3 / Flow 4)
+// Returns only the public key — never the wrapped private key or salt
+app.get('/users/:userId/public-key', (req, res) => {
+  const { userId } = req.params;
+  const user = users[userId];
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  res.json({ userId, publicKey: user.publicKey });
+});
+
 // Create vault item with schema validation
 app.post('/vault/create', (req, res) => {
   try {
@@ -449,16 +460,15 @@ app.post('/vault/get-wrapped-dek', (req, res) => {
     }
 
     const wrappedDEK = wrappedDEKs[itemId]?.[userId];
-     const ownerPublicKey = users[item.ownerId].publicKey;
     if (!wrappedDEK) {
       return res.status(401).json({ error: 'No access to this secret' });
     }
 
+    // ECIES: ownerPublicKey no longer needed — ephemeral public key is packed inside wrappedDEK
     res.json({
       itemId,
       userId,
       wrappedDEK,
-      ownerPublicKey
     });
   } catch (err) {
     console.error(err);

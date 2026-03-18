@@ -191,8 +191,8 @@
         <div class="card">
           <h2>Step 1: Register</h2>
           <div class="stack">
-            <div><label>User 1</label><input id="u1-username" value="manish" /><label>Password</label><input id="u1-password" type="password" value="manish1" /></div>
-            <div><label>User 2</label><input id="u2-username" value="jason" /><label>Password</label><input id="u2-password" type="password" value="jason1" /></div>
+            <div><label>User 1</label><input id="u1-username" value="manish" /><label>Master Password</label><input id="u1-password" type="text" value="manish1" /></div>
+            <div><label>User 2</label><input id="u2-username" value="jason" /><label>Master Password</label><input id="u2-password" type="text" value="jason1" /></div>
             <button id="btn-register">Register Users</button>
           </div>
           <div style="margin-top: 12px"><span class="badge">U1: <span id="u1-id">-</span></span></div>
@@ -382,34 +382,38 @@
         return cleaned;
       }
 
-      // Wrap DEK using ECDH with recipient's public key and owner's private key
-      async function wrapDEKWithPublicKey(dekRaw, theirPublicKeyJwk, myPrivateKeyJwk) {
+      // Wrap DEK using ECIES (ephemeral ECDH + AES-256-GCM).
+      // Doc intent: "Public key encrypts DEKs" — only the recipient's public key is
+      // needed to wrap. A fresh ephemeral keypair is generated per wrap operation.
+      // Packed output format: ephemeralPublicKey (65 bytes, uncompressed P-256 point)
+      //                       + IV (12 bytes) + AES-GCM ciphertext
+      // The unwrapper reads the ephemeral public key from the blob — no sender
+      // identity is required or encoded.
+      async function wrapDEKWithPublicKey(dekRaw, recipientPublicKeyJwk) {
         try {
-          // Import keys with cleaned JWK to avoid conflicts
-          const theirPublicKey = await crypto.subtle.importKey(
+          // Import recipient's long-term public key
+          const recipientPublicKey = await crypto.subtle.importKey(
             'jwk',
-            cleanJWK(theirPublicKeyJwk),  // Remove 'use' field that might say "sig"
+            cleanJWK(recipientPublicKeyJwk),
             { name: 'ECDH', namedCurve: 'P-256' },
             false,
-            []  // No usages needed for public key in ECDH
+            []
           );
 
-          const myPrivateKey = await crypto.subtle.importKey(
-            'jwk',
-            cleanJWK(myPrivateKeyJwk),
+          // Generate a fresh ephemeral keypair for this wrap operation only
+          const ephemeralKeypair = await crypto.subtle.generateKey(
             { name: 'ECDH', namedCurve: 'P-256' },
             true,
             ['deriveBits']
           );
 
-          // ECDH key agreement
+          // ECDH: ephemeralPrivate × recipientPublic → shared secret
           const sharedSecret = await crypto.subtle.deriveBits(
-            { name: 'ECDH', public: theirPublicKey },
-            myPrivateKey,
+            { name: 'ECDH', public: recipientPublicKey },
+            ephemeralKeypair.privateKey,
             256
           );
 
-          // Derive symmetric key from shared secret
           const encryptionKey = await crypto.subtle.importKey(
             'raw',
             sharedSecret,
@@ -418,47 +422,61 @@
             ['encrypt']
           );
 
-          // Encrypt DEK with derived key (same pattern as current)
+          // Encrypt DEK
           const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-          const ct = await crypto.subtle.encrypt(
-            { name: 'AES-GCM', iv },
-            encryptionKey,
-            dekRaw
-          );
-          return toBase64(pack(iv, ct));
+          const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, encryptionKey, dekRaw);
+
+          // Pack: ephemeral public key (65 bytes raw) + IV + ciphertext
+          const ephemeralPubRaw = await crypto.subtle.exportKey('raw', ephemeralKeypair.publicKey);
+          const ephemeralPubBytes = new Uint8Array(ephemeralPubRaw); // 65 bytes uncompressed
+          const packed = new Uint8Array(ephemeralPubBytes.length + iv.length + ct.byteLength);
+          packed.set(ephemeralPubBytes, 0);
+          packed.set(iv, ephemeralPubBytes.length);
+          packed.set(new Uint8Array(ct), ephemeralPubBytes.length + iv.length);
+          return toBase64(packed);
         } catch (err) {
-          throw new Error(`ECDH wrapping failed: ${err.message}`);
+          throw new Error(`ECIES wrapping failed: ${err.message}`);
         }
       }
 
-      // Unwrap DEK using ECDH with my private key and their public key
-      async function unwrapDEKWithPrivateKey(wrappedDEKB64, myPrivateKeyJwk, theirPublicKeyJwk) {
+      // Unwrap DEK using ECIES — only my private key is needed.
+      // The ephemeral public key is read from the packed blob (first 65 bytes).
+      // No sender identity / owner public key required.
+      async function unwrapDEKWithPrivateKey(wrappedDEKB64, myPrivateKeyJwk) {
         try {
-          // Import keys with cleaned JWK
-          const theirPublicKey = await crypto.subtle.importKey(
-            'jwk',
-            cleanJWK(theirPublicKeyJwk),  // Remove 'use' field
+          const packedBytes = fromBase64(wrappedDEKB64);
+
+          // Unpack: ephemeral public key (65 bytes) + IV (12 bytes) + ciphertext
+          const EPHEMERAL_PUB_LENGTH = 65; // uncompressed P-256 point
+          const ephemeralPubBytes = packedBytes.slice(0, EPHEMERAL_PUB_LENGTH);
+          const iv = packedBytes.slice(EPHEMERAL_PUB_LENGTH, EPHEMERAL_PUB_LENGTH + IV_LENGTH);
+          const ciphertext = packedBytes.slice(EPHEMERAL_PUB_LENGTH + IV_LENGTH);
+
+          // Import ephemeral public key from raw bytes in the blob
+          const ephemeralPublicKey = await crypto.subtle.importKey(
+            'raw',
+            ephemeralPubBytes,
             { name: 'ECDH', namedCurve: 'P-256' },
             false,
             []
           );
 
+          // Import my private key
           const myPrivateKey = await crypto.subtle.importKey(
             'jwk',
             cleanJWK(myPrivateKeyJwk),
             { name: 'ECDH', namedCurve: 'P-256' },
-            true,
+            false,
             ['deriveBits']
           );
 
-          // ECDH key agreement (same shared secret)
+          // ECDH: myPrivate × ephemeralPublic → same shared secret as wrap
           const sharedSecret = await crypto.subtle.deriveBits(
-            { name: 'ECDH', public: theirPublicKey },
+            { name: 'ECDH', public: ephemeralPublicKey },
             myPrivateKey,
             256
           );
 
-          // Derive symmetric key from shared secret
           const decryptionKey = await crypto.subtle.importKey(
             'raw',
             sharedSecret,
@@ -467,17 +485,10 @@
             ['decrypt']
           );
 
-          // Decrypt DEK
-          const packed = fromBase64(wrappedDEKB64);
-          const { iv, ciphertext } = unpack(packed);
-          const dekRaw = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv },
-            decryptionKey,
-            ciphertext
-          );
+          const dekRaw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, decryptionKey, ciphertext);
           return new Uint8Array(dekRaw);
         } catch (err) {
-          throw new Error(`ECDH unwrapping failed: ${err.message}`);
+          throw new Error(`ECIES unwrapping failed: ${err.message}`);
         }
       }
 
@@ -905,8 +916,8 @@
       //   DEK with the owner’s public key (ECDH → AES‑GCM). Send the mixed
       //   plaintext/ciphertext secretData plus wrappedDEK + schemaType.
       // - Backend: validates plaintext against the schema, stores the
-      //   secretData and a single wrappedDEK entry for the owner
-      //   (in-memory vaultItems + wrappedDEKs for this POC).
+      //   secretData and the owner wrappedDEK (in-memory for this POC).
+      //   Step 4 (policy check) + Step 5 (wrap loop) + Step 6 (send) implemented below.
       async function saveSecret(schemaType) {
         try {
           const householdId = householdInput.value;
@@ -949,17 +960,43 @@
             log(`   ${fieldName}: ${isEncrypted ? '[ENCRYPTED]' : '[PLAINTEXT]'} ${preview}`);
           }
 
-          // Step 4: Wrap DEK with owner's public key using ECDH
-          log(`\n🔑 Wrapping DEK with owner public key (ECDH)...`);
-          const wrappedDEK = await wrapDEKWithPublicKey(
-            dekRaw,
-            state.currentUser.publicKeyJwk,      // recipient = owner themselves
-            state.currentUser.privateKeyJwk      // owner's private key
-          );
-          log('✅ DEK wrapped with ECDH (asymmetric)');
+          // Step 4: Policy check — fetch public keys of all default-access users.
+          // Doc: "Who gets default access? Fetch Co-Owner's public key, wrap DEK for each."
+          // In this demo the policy resolves to owner only. In production, a
+          // /vault/default-access-users endpoint would return all trust-level
+          // members (Co-Owner, etc.) who should receive a wrapped DEK at create time.
+          log(`\n🔑 Step 4: Policy check — fetching default-access user public keys...`);
+          const ownerKeyRes = await fetch(`/users/${state.currentUser.id}/public-key`);
+          if (!ownerKeyRes.ok) throw new Error('Failed to fetch owner public key');
+          const ownerKeyData = await ownerKeyRes.json();
 
-          // Step 5: Send to backend
-          log(`\n📤 Sending to backend for schema validation...`);
+          // defaultAccessUsers = [{ userId, publicKey }]
+          // Extend this array with Co-owner / household members in production.
+          const defaultAccessUsers = [
+            { userId: ownerKeyData.userId, publicKey: ownerKeyData.publicKey },
+          ];
+          log(`   Policy resolved ${defaultAccessUsers.length} user(s): [${defaultAccessUsers.map(u => u.userId).join(', ')}]`);
+
+          // Step 5: Wrap DEK for each default-access user (envelope encryption loop).
+          // Doc: "Wrap DEK with each user's public key" — one wrappedDEK entry per user.
+          log(`\n🔐 Step 5: Wrapping DEK for each default-access user...`);
+          const wrappedDEKEntries = [];
+          for (const { userId, publicKey } of defaultAccessUsers) {
+            const wrappedDEKForUser = await wrapDEKWithPublicKey(
+              dekRaw,
+              publicKey  // recipient's public key — ECIES, no sender private key needed
+            );
+            wrappedDEKEntries.push({ userId, wrappedDEK: wrappedDEKForUser });
+            log(`   Wrapped DEK for: ${userId}`);
+          }
+
+          // Extract owner's wrapped copy — /vault/create contract expects single wrappedDEK string.
+          const ownerEntry = wrappedDEKEntries.find(e => e.userId === state.currentUser.id);
+          const wrappedDEK = ownerEntry.wrappedDEK;
+
+          // Step 6: Send to backend
+          log(`\n📤 Step 6: Sending to backend for schema validation...`);
+          log(`   Wrapped DEKs generated: ${wrappedDEKEntries.length} — sending owner copy to /vault/create`);
           const createRes = await fetch('/vault/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -982,7 +1019,7 @@
           secretIdSpan.textContent = createData.itemId;
           log(`✅ Secret created: ${createData.itemId}`);
           log(`✅ Backend validated plaintext fields against schema`);
-          log(`✅ DEK wrapped and stored\n`);
+          log(`✅ DEK wrapped and stored for ${wrappedDEKEntries.length} user(s)\n`);
           
           // Store secret data for viewing (but NOT the DEK key - fetch on-demand)
           state.secretData = secretData;
@@ -1347,8 +1384,7 @@
           const dekData = await dekResponse.json();
           const dekRaw = await unwrapDEKWithPrivateKey(
             dekData.wrappedDEK,
-            state.currentUser.privateKeyJwk,
-            dekData.ownerPublicKey
+            state.currentUser.privateKeyJwk  // ECIES: ephemeral pub key read from blob
           );
           const dekKey = await importDEK(dekRaw);
           log(`✅ DEK unwrapped successfully`);
@@ -1430,12 +1466,11 @@
 
           const dekData = await dekFetchRes.json();
 
-          // Step 3: Unwrap DEK using owner's ECDH keys (same DEK as create/share)
+          // Step 3: Unwrap DEK using owner's private key (ECIES: ephemeral pub key is in the blob)
           log('🔓 Step 3: Unwrapping DEK with owner private key...');
           const dekRaw = await unwrapDEKWithPrivateKey(
             dekData.wrappedDEK,
-            state.currentUser.privateKeyJwk,
-            dekData.ownerPublicKey
+            state.currentUser.privateKeyJwk
           );
           const dekKey = await importDEK(dekRaw);
           log('✅ DEK unwrapped for update (reusing existing DEK)');
@@ -1740,30 +1775,27 @@
           const dekData = await dekFetchRes.json();
           log(`✅ Received wrapped DEK`);
 
-          // Step 3: Unwrap DEK using owner's ECDH (private key + owner's public key)
+          // Step 3: Unwrap DEK using owner's private key (ECIES: ephemeral pub key is in the blob)
           log(`🔓 Step 3: Unwrapping DEK with owner's private key...`);
           const dekRaw = await unwrapDEKWithPrivateKey(
             dekData.wrappedDEK,
-            state.currentUser.privateKeyJwk,      // Owner's private key
-            state.currentUser.publicKeyJwk        // Owner's public key
+            state.currentUser.privateKeyJwk
           );
           log(`✅ DEK unwrapped`);
 
           // Step 4: Get recipient's public key
           log(`📥 Step 4: Fetching recipient's public key...`);
-          // For demo: we already have recipient in state
           const recipientPublicKey = state.user2.publicKeyJwk;
           if (!recipientPublicKey) {
             throw new Error('Recipient public key not available');
           }
           log(`✅ Got recipient public key`);
 
-          // Step 5: Rewrap DEK for recipient using ECDH (recipient's public key + owner's private key)
-          log(`🔐 Step 5: Rewrapping DEK for recipient...`);
+          // Step 5: Rewrap DEK for recipient — ECIES, only recipient public key needed
+          log(`🔐 Step 5: Rewrapping DEK for recipient (ECIES)...`);
           const wrappedDEKForRecipient = await wrapDEKWithPublicKey(
             dekRaw,
-            recipientPublicKey,             // Recipient's public key
-            state.currentUser.privateKeyJwk      // Owner's private key
+            recipientPublicKey  // ECIES: generates fresh ephemeral keypair, no owner private key
           );
           log(`✅ DEK rewrapped for recipient`);
 
