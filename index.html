@@ -333,20 +333,6 @@
       async function importDEK(dekRaw) {
         return crypto.subtle.importKey('raw', dekRaw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
       }
-
-      async function wrapDEKWithKEK(dekRaw, kek) {
-        const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-        const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, kek, dekRaw);
-        return toBase64(pack(iv, ct));
-      }
-
-      async function unwrapDEKWithKEK(wrappedDEKB64, kek) {
-        const packed = fromBase64(wrappedDEKB64);
-        const { iv, ciphertext } = unpack(packed);
-        const dekRaw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, kek, ciphertext);
-        return new Uint8Array(dekRaw);
-      }
-
       async function encryptField(fieldValue, dekKey) {
         const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
         const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, dekKey, encoder.encode(String(fieldValue)));
